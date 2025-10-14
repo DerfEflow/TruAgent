@@ -1,14 +1,16 @@
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Depends
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import os
 import hashlib
 import json
-import base64
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
 from openai import OpenAI
 
 app = FastAPI()
@@ -25,13 +27,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-ADMIN_EMAIL = "fred@trulineroofing.com"
+SECRET_KEY = os.getenv("SESSION_SECRET", secrets.token_urlsafe(32))
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
-USERS = {
-    "fred@trulineroofing.com": hashlib.sha256(b"truline2024").hexdigest(),
-    "fieldcrew@trulineroofing.com": hashlib.sha256(b"roof123").hexdigest(),
-    "office@trulineroofing.com": hashlib.sha256(b"office123").hexdigest()
-}
+ZAPIER_SECRET = os.getenv("ZAPIER_SECRET", "change_this_secret_in_production")
+
+ADMIN_EMAIL = "fred@trulineroofing.com"
 
 db_file = "db.json"
 
@@ -39,11 +41,70 @@ def load_db():
     if os.path.exists(db_file):
         with open(db_file, 'r') as f:
             return json.load(f)
-    return {"jobs": {}, "documents": {}, "chat_history": {}}
+    return {
+        "jobs": {},
+        "documents": {},
+        "chat_history": {},
+        "users": {
+            "fred@trulineroofing.com": {
+                "email": "fred@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"truline2024").hexdigest(),
+                "is_admin": True
+            },
+            "fieldcrew@trulineroofing.com": {
+                "email": "fieldcrew@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"roof123").hexdigest(),
+                "is_admin": False
+            },
+            "office@trulineroofing.com": {
+                "email": "office@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"office123").hexdigest(),
+                "is_admin": False
+            }
+        }
+    }
 
 def save_db(data):
     with open(db_file, 'w') as f:
         json.dump(data, f, indent=2)
+
+security = HTTPBearer()
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None or not isinstance(email, str):
+            raise credentials_exception
+        
+        db = load_db()
+        user = db["users"].get(email)
+        if user is None:
+            raise credentials_exception
+        return user
+    except JWTError:
+        raise credentials_exception
+
+async def get_admin_user(current_user: dict = Depends(get_current_user)):
+    if not current_user.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 class Login(BaseModel):
     email: str
@@ -61,11 +122,16 @@ class ChatMessage(BaseModel):
     message: str
     
 class ZapierWebhook(BaseModel):
+    secret: str
     job_id: Optional[str] = None
     client_name: Optional[str] = None
     address: Optional[str] = None
     status: Optional[str] = None
     data: Optional[dict] = None
+
+class AIAction(BaseModel):
+    action: str
+    parameters: dict
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -73,29 +139,37 @@ def index():
 
 @app.post("/login")
 async def login(data: Login):
+    db = load_db()
+    user = db["users"].get(data.email)
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
     hashed = hashlib.sha256(data.password.encode()).hexdigest()
-    if USERS.get(data.email) == hashed:
-        is_admin = data.email == ADMIN_EMAIL
-        return {"status": "ok", "token": data.email, "is_admin": is_admin}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user["password_hash"] != hashed:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["email"], "is_admin": user.get("is_admin", False)},
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "status": "ok",
+        "token": access_token,
+        "is_admin": user.get("is_admin", False)
+    }
 
 @app.post("/job")
-async def add_job(job: Job, request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def add_job(job: Job, current_user: dict = Depends(get_current_user)):
     db = load_db()
     db["jobs"][job.job_id] = job.dict()
     save_db(db)
     return {"msg": f"Job {job.job_id} saved"}
 
 @app.get("/job/{job_id}")
-async def get_job(job_id: str, request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     db = load_db()
     job = db["jobs"].get(job_id)
     if not job:
@@ -103,39 +177,39 @@ async def get_job(job_id: str, request: Request):
     return job
 
 @app.get("/jobs")
-async def get_all_jobs(request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def get_all_jobs(current_user: dict = Depends(get_current_user)):
     db = load_db()
     return {"jobs": db["jobs"]}
 
 @app.post("/zapier/webhook")
 async def zapier_webhook(webhook: ZapierWebhook):
+    if webhook.secret != ZAPIER_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    
     db = load_db()
     
     if webhook.job_id:
         if webhook.job_id in db["jobs"]:
             for key, value in webhook.dict().items():
-                if value is not None and key != "data":
+                if value is not None and key not in ["secret", "data"]:
                     db["jobs"][webhook.job_id][key] = value
+            if webhook.data:
+                db["jobs"][webhook.job_id].update(webhook.data)
         else:
-            db["jobs"][webhook.job_id] = webhook.dict()
+            job_data = {k: v for k, v in webhook.dict().items() if k != "secret" and v is not None}
+            if webhook.data:
+                job_data.update(webhook.data)
+            db["jobs"][webhook.job_id] = job_data
     
     save_db(db)
     return {"status": "ok", "message": "Webhook received"}
 
 @app.post("/documents/upload")
 async def upload_document(
-    request: Request,
     file: UploadFile = File(...),
-    description: str = Form("")
+    description: str = Form(""),
+    current_user: dict = Depends(get_current_user)
 ):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
     os.makedirs("documents", exist_ok=True)
     
     file_content = await file.read()
@@ -151,7 +225,7 @@ async def upload_document(
         "filename": file.filename,
         "filepath": file_path,
         "description": description,
-        "uploaded_by": token,
+        "uploaded_by": current_user["email"],
         "uploaded_at": datetime.now().isoformat()
     }
     save_db(db)
@@ -159,20 +233,12 @@ async def upload_document(
     return {"status": "ok", "doc_id": doc_id, "filename": file.filename}
 
 @app.get("/documents")
-async def get_documents(request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def get_documents(current_user: dict = Depends(get_current_user)):
     db = load_db()
     return {"documents": db["documents"]}
 
 @app.get("/documents/{doc_id}/download")
-async def download_document(doc_id: str, request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def download_document(doc_id: str, current_user: dict = Depends(get_current_user)):
     db = load_db()
     doc = db["documents"].get(doc_id)
     
@@ -182,11 +248,7 @@ async def download_document(doc_id: str, request: Request):
     return FileResponse(doc["filepath"], filename=doc["filename"])
 
 @app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, request: Request):
-    token = request.headers.get("Authorization")
-    if token != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can delete documents")
-    
+async def delete_document(doc_id: str, current_user: dict = Depends(get_admin_user)):
     db = load_db()
     doc = db["documents"].get(doc_id)
     
@@ -201,18 +263,53 @@ async def delete_document(doc_id: str, request: Request):
     
     return {"status": "ok", "message": "Document deleted"}
 
-@app.post("/chat")
-async def chat(message: ChatMessage, request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+@app.post("/ai/action")
+async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_current_user)):
     db = load_db()
     
-    if token not in db["chat_history"]:
-        db["chat_history"][token] = []
+    if action.action == "update_job_status":
+        job_id = action.parameters.get("job_id")
+        new_status = action.parameters.get("status")
+        if job_id in db["jobs"]:
+            db["jobs"][job_id]["status"] = new_status
+            save_db(db)
+            return {"status": "ok", "message": f"Job {job_id} status updated to {new_status}"}
+        return {"status": "error", "message": "Job not found"}
     
-    db["chat_history"][token].append({
+    elif action.action == "add_job_note":
+        job_id = action.parameters.get("job_id")
+        note = action.parameters.get("note")
+        if job_id in db["jobs"]:
+            if "notes" not in db["jobs"][job_id]:
+                db["jobs"][job_id]["notes"] = []
+            db["jobs"][job_id]["notes"].append(note)
+            save_db(db)
+            return {"status": "ok", "message": f"Note added to job {job_id}"}
+        return {"status": "error", "message": "Job not found"}
+    
+    elif action.action == "list_jobs":
+        return {"status": "ok", "jobs": db["jobs"]}
+    
+    elif action.action == "get_job_details":
+        job_id = action.parameters.get("job_id")
+        if job_id in db["jobs"]:
+            return {"status": "ok", "job": db["jobs"][job_id]}
+        return {"status": "error", "message": "Job not found"}
+    
+    elif action.action == "list_documents":
+        return {"status": "ok", "documents": db["documents"]}
+    
+    return {"status": "error", "message": "Unknown action"}
+
+@app.post("/chat")
+async def chat(message: ChatMessage, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    
+    user_email = current_user["email"]
+    if user_email not in db["chat_history"]:
+        db["chat_history"][user_email] = []
+    
+    db["chat_history"][user_email].append({
         "role": "user",
         "content": message.message,
         "timestamp": datetime.now().isoformat()
@@ -226,19 +323,20 @@ Current available data:
 - Documents: {json.dumps(db['documents'], indent=2)}
 
 You can help with:
-- Viewing and editing job details
-- Managing documents
+- Viewing and summarizing job details
+- Providing information about documents
 - Answering questions about roofing projects
-- Providing summaries and reports
+- Creating reports and summaries
 
-User: {token}
-Is Admin: {token == ADMIN_EMAIL}
+When users ask you to update job status, add notes, or manipulate data, explain what you would do but note that direct data manipulation requires additional implementation. Provide detailed, helpful responses about the current state of jobs and documents.
+
+User: {user_email}
+Is Admin: {current_user.get('is_admin', False)}
 """
     
-    from typing import List, Dict, Any
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     
-    for msg in db["chat_history"][token][-10:]:
+    for msg in db["chat_history"][user_email][-10:]:
         messages.append({
             "role": msg["role"],
             "content": msg["content"]
@@ -247,14 +345,14 @@ Is Admin: {token == ADMIN_EMAIL}
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages,
+            messages=messages,  # type: ignore
             temperature=0.7,
             max_tokens=1000
         )
         
         assistant_message = response.choices[0].message.content
         
-        db["chat_history"][token].append({
+        db["chat_history"][user_email].append({
             "role": "assistant",
             "content": assistant_message,
             "timestamp": datetime.now().isoformat()
@@ -268,30 +366,31 @@ Is Admin: {token == ADMIN_EMAIL}
         raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
 
 @app.get("/chat/history")
-async def get_chat_history(request: Request):
-    token = request.headers.get("Authorization")
-    if token not in USERS:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+async def get_chat_history(current_user: dict = Depends(get_current_user)):
     db = load_db()
-    history = db["chat_history"].get(token, [])
-    
+    history = db["chat_history"].get(current_user["email"], [])
     return {"history": history}
 
 @app.delete("/users/{email}")
-async def delete_user_access(email: str, request: Request):
-    token = request.headers.get("Authorization")
-    if token != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can delete user access")
-    
+async def delete_user_access(email: str, current_user: dict = Depends(get_admin_user)):
     if email == ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail="Cannot delete admin account")
     
-    if email in USERS:
-        del USERS[email]
+    db = load_db()
+    if email in db["users"]:
+        del db["users"][email]
+        save_db(db)
         return {"status": "ok", "message": f"User {email} access deleted"}
     
     raise HTTPException(status_code=404, detail="User not found")
+
+@app.get("/admin/webhook-info")
+async def get_webhook_info(current_user: dict = Depends(get_admin_user)):
+    return {
+        "webhook_url": "/zapier/webhook",
+        "secret": ZAPIER_SECRET,
+        "instructions": "Include the 'secret' field in your Zapier webhook payload"
+    }
 
 if __name__ == "__main__":
     import uvicorn

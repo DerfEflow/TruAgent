@@ -14,12 +14,12 @@
       <img src="/static/logo.png" alt="Truline Roofing" class="logo">
       <h1>Truline Roofing</h1>
       <h2>AI Agent Portal</h2>
-      <div class="login-form">
-        <input type="email" id="email" placeholder="Email Address" autocomplete="email">
-        <input type="password" id="password" placeholder="Password" autocomplete="current-password">
-        <button onclick="login()" class="btn-primary">Sign In</button>
+      <form class="login-form" onsubmit="event.preventDefault(); login();">
+        <input type="email" id="email" placeholder="Email Address" autocomplete="email" required>
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" class="btn-primary">Sign In</button>
         <div id="login-error" class="error-message"></div>
-      </div>
+      </form>
     </div>
   </div>
 
@@ -79,12 +79,18 @@
           <h2>Admin Controls</h2>
         </div>
         <div class="admin-section">
-          <h3>Zapier Webhook URL</h3>
+          <h3>Zapier Webhook Configuration</h3>
           <div class="webhook-info">
+            <strong>Webhook URL:</strong>
             <code id="webhook-url"></code>
             <button onclick="copyWebhookUrl()" class="btn-secondary">Copy URL</button>
           </div>
-          <p class="help-text">Use this URL in your Zapier integration to send Roofr data to this app</p>
+          <div class="webhook-info">
+            <strong>Secret Key:</strong>
+            <code id="webhook-secret"></code>
+            <button onclick="copyWebhookSecret()" class="btn-secondary">Copy Secret</button>
+          </div>
+          <p class="help-text">Configure your Zapier webhook to send Roofr data to this app. Include the secret key in the "secret" field of the webhook payload for security.</p>
         </div>
         <div class="admin-section">
           <h3>User Management</h3>

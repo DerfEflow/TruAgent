@@ -27,8 +27,7 @@ function showDashboard() {
   
   if (isAdmin) {
     document.querySelectorAll('.admin-only').forEach(el => el.classList.remove('hidden'));
-    const webhookUrl = `${window.location.origin}/zapier/webhook`;
-    document.getElementById('webhook-url').textContent = webhookUrl;
+    loadWebhookInfo();
   }
   
   loadChatHistory();
@@ -97,7 +96,7 @@ function showLoading(show) {
 async function loadChatHistory() {
   try {
     const response = await fetch('/chat/history', {
-      headers: { 'Authorization': token }
+      headers: { 'Authorization': `Bearer ${token}` }
     });
     
     if (response.ok) {
@@ -142,7 +141,7 @@ async function sendChatMessage() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': token
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({ message })
     });
@@ -166,10 +165,27 @@ function handleChatKeypress(event) {
   }
 }
 
+async function loadWebhookInfo() {
+  try {
+    const response = await fetch('/admin/webhook-info', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      const webhookUrl = `${window.location.origin}${data.webhook_url}`;
+      document.getElementById('webhook-url').textContent = webhookUrl;
+      document.getElementById('webhook-secret').textContent = data.secret;
+    }
+  } catch (error) {
+    console.error('Failed to load webhook info:', error);
+  }
+}
+
 async function refreshJobs() {
   try {
     const response = await fetch('/jobs', {
-      headers: { 'Authorization': token }
+      headers: { 'Authorization': `Bearer ${token}` }
     });
     
     if (response.ok) {
@@ -204,7 +220,7 @@ async function refreshJobs() {
 async function refreshDocuments() {
   try {
     const response = await fetch('/documents', {
-      headers: { 'Authorization': token }
+      headers: { 'Authorization': `Bearer ${token}` }
     });
     
     if (response.ok) {
@@ -255,7 +271,7 @@ async function uploadDocument() {
     showLoading(true);
     const response = await fetch('/documents/upload', {
       method: 'POST',
-      headers: { 'Authorization': token },
+      headers: { 'Authorization': `Bearer ${token}` },
       body: formData
     });
     
@@ -274,7 +290,40 @@ async function uploadDocument() {
 }
 
 async function downloadDocument(docId) {
-  window.open(`/documents/${docId}/download`, '_blank');
+  try {
+    showLoading(true);
+    const response = await fetch(`/documents/${docId}/download`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      const blob = await response.blob();
+      const contentDisposition = response.headers.get('content-disposition');
+      let filename = `document-${docId}`;
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } else {
+      alert('Failed to download document');
+    }
+  } catch (error) {
+    alert('Failed to download document');
+  } finally {
+    showLoading(false);
+  }
 }
 
 async function deleteDocument(docId) {
@@ -286,7 +335,7 @@ async function deleteDocument(docId) {
     showLoading(true);
     const response = await fetch(`/documents/${docId}`, {
       method: 'DELETE',
-      headers: { 'Authorization': token }
+      headers: { 'Authorization': `Bearer ${token}` }
     });
     
     if (response.ok) {
@@ -306,4 +355,10 @@ function copyWebhookUrl() {
   const webhookUrl = document.getElementById('webhook-url').textContent;
   navigator.clipboard.writeText(webhookUrl);
   alert('Webhook URL copied to clipboard!');
+}
+
+function copyWebhookSecret() {
+  const webhookSecret = document.getElementById('webhook-secret').textContent;
+  navigator.clipboard.writeText(webhookSecret);
+  alert('Webhook secret copied to clipboard!');
 }
