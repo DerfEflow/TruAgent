@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Truline Roofing AI Agent</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+</head>
+<body>
+  <div id="login-screen" class="screen">
+    <div class="login-container">
+      <img src="/static/logo.png" alt="Truline Roofing" class="logo">
+      <h1>Truline Roofing</h1>
+      <h2>AI Agent Portal</h2>
+      <div class="login-form">
+        <input type="email" id="email" placeholder="Email Address" autocomplete="email">
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+        <button onclick="login()" class="btn-primary">Sign In</button>
+        <div id="login-error" class="error-message"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="dashboard-screen" class="screen hidden">
+    <header class="header">
+      <div class="header-content">
+        <img src="/static/logo.png" alt="Truline Roofing" class="header-logo">
+        <h1>Truline Roofing AI Agent</h1>
+        <div class="user-info">
+          <span id="user-email"></span>
+          <button onclick="logout()" class="btn-secondary">Logout</button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" onclick="showTab('ai-agent')">AI Agent</button>
+      <button class="tab" onclick="showTab('jobs')">Jobs</button>
+      <button class="tab" onclick="showTab('documents')">Documents</button>
+      <button class="tab admin-only hidden" onclick="showTab('admin')">Admin</button>
+    </nav>
+
+    <main class="main-content">
+      <div id="ai-agent-tab" class="tab-content active">
+        <div class="chat-container">
+          <div class="chat-header">
+            <h2>AI Assistant</h2>
+            <p>Ask me anything about your jobs, documents, or data management</p>
+          </div>
+          <div id="chat-messages" class="chat-messages"></div>
+          <div class="chat-input-container">
+            <input type="text" id="chat-input" placeholder="Ask the AI agent..." onkeypress="handleChatKeypress(event)">
+            <button onclick="sendChatMessage()" class="btn-primary">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="jobs-tab" class="tab-content">
+        <div class="section-header">
+          <h2>Roofr CRM Jobs</h2>
+          <button onclick="refreshJobs()" class="btn-secondary">Refresh</button>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+      </div>
+
+      <div id="documents-tab" class="tab-content">
+        <div class="section-header">
+          <h2>Company Documents</h2>
+          <button onclick="document.getElementById('file-upload').click()" class="btn-primary">Upload Document</button>
+          <input type="file" id="file-upload" style="display: none" onchange="uploadDocument()">
+        </div>
+        <div id="documents-list" class="documents-list"></div>
+      </div>
+
+      <div id="admin-tab" class="tab-content admin-only">
+        <div class="section-header">
+          <h2>Admin Controls</h2>
+        </div>
+        <div class="admin-section">
+          <h3>Zapier Webhook URL</h3>
+          <div class="webhook-info">
+            <code id="webhook-url"></code>
+            <button onclick="copyWebhookUrl()" class="btn-secondary">Copy URL</button>
+          </div>
+          <p class="help-text">Use this URL in your Zapier integration to send Roofr data to this app</p>
+        </div>
+        <div class="admin-section">
+          <h3>User Management</h3>
+          <p class="help-text">Manage user access and permissions</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="loading" class="loading hidden">
+    <div class="spinner"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

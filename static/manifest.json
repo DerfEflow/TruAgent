@@ -1,0 +1,17 @@
+{
+  "name": "Truline Roofing AI Agent",
+  "short_name": "Truline AI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#006837",
+  "theme_color": "#006837",
+  "description": "AI-powered roofing management system for Truline Roofing",
+  "icons": [
+    {
+      "src": "/static/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
