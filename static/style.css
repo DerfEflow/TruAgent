@@ -434,6 +434,86 @@ body {
   background: #b71c1c;
 }
 
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 10000;
+}
+
+.modal-content {
+  background: var(--white);
+  padding: 30px;
+  border-radius: 12px;
+  max-width: 500px;
+  width: 90%;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.modal-content h3 {
+  color: var(--truline-green);
+  margin-bottom: 20px;
+}
+
+.modal-content input,
+.modal-content select {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 15px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.modal-content input:focus,
+.modal-content select:focus {
+  outline: none;
+  border-color: var(--truline-green);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.modal-actions button {
+  flex: 1;
+}
+
+.users-list {
+  margin-top: 20px;
+}
+
+.user-card {
+  background: var(--truline-light-gray);
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.user-info-card {
+  flex: 1;
+}
+
+.user-info-card strong {
+  color: var(--truline-green);
+}
+
+.user-actions {
+  display: flex;
+  gap: 10px;
+}
+
 @media (max-width: 768px) {
   .header-content {
     flex-direction: column;
@@ -450,5 +530,14 @@ body {
   
   .message {
     max-width: 85%;
+  }
+  
+  .user-card {
+    flex-direction: column;
+    gap: 10px;
+  }
+  
+  .user-actions {
+    width: 100%;
   }
 }

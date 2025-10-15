@@ -98,9 +98,34 @@
         <div class="admin-section">
           <h3>User Management</h3>
           <p class="help-text">Manage user access and permissions</p>
+          
+          <div class="user-management">
+            <button onclick="showAddUserModal()" class="btn-primary">Add New User</button>
+            <div id="users-list" class="users-list"></div>
+          </div>
         </div>
       </div>
     </main>
+  </div>
+
+  <div id="add-user-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Add New User</h3>
+      <form onsubmit="event.preventDefault(); createUser();">
+        <input type="email" id="new-user-email" placeholder="Email Address" required>
+        <input type="password" id="new-user-password" placeholder="Password" required>
+        <select id="new-user-role" required>
+          <option value="">Select Role</option>
+          <option value="super_admin">Super Admin</option>
+          <option value="manager">Manager</option>
+          <option value="user">User</option>
+        </select>
+        <div class="modal-actions">
+          <button type="submit" class="btn-primary">Create User</button>
+          <button type="button" onclick="closeAddUserModal()" class="btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <div id="loading" class="loading hidden">

@@ -118,6 +118,7 @@ function showTab(tabName) {
   
   if (tabName === 'jobs') refreshJobs();
   if (tabName === 'documents') refreshDocuments();
+  if (tabName === 'admin') loadUsers();
 }
 
 function showLoading(show) {
@@ -396,4 +397,164 @@ function copyWebhookSecret() {
   const webhookSecret = document.getElementById('webhook-secret').textContent;
   navigator.clipboard.writeText(webhookSecret);
   alert('Webhook secret copied to clipboard!');
+}
+
+function showAddUserModal() {
+  document.getElementById('add-user-modal').classList.remove('hidden');
+}
+
+function closeAddUserModal() {
+  document.getElementById('add-user-modal').classList.add('hidden');
+  document.getElementById('new-user-email').value = '';
+  document.getElementById('new-user-password').value = '';
+  document.getElementById('new-user-role').value = '';
+}
+
+async function createUser() {
+  const email = document.getElementById('new-user-email').value;
+  const password = document.getElementById('new-user-password').value;
+  const role = document.getElementById('new-user-role').value;
+  
+  try {
+    showLoading(true);
+    const response = await fetch('/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ email, password, role })
+    });
+    
+    if (response.ok) {
+      alert('User created successfully!');
+      closeAddUserModal();
+      loadUsers();
+    } else {
+      const data = await response.json();
+      alert(`Failed to create user: ${data.detail || 'Unknown error'}`);
+    }
+  } catch (error) {
+    alert('Failed to create user');
+  } finally {
+    showLoading(false);
+  }
+}
+
+async function loadUsers() {
+  if (!isSuperAdmin()) return;
+  
+  try {
+    const response = await fetch('/users', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      const usersList = document.getElementById('users-list');
+      usersList.innerHTML = '';
+      
+      const currentEmail = localStorage.getItem('user_email');
+      
+      data.users.forEach(user => {
+        const userCard = document.createElement('div');
+        userCard.className = 'user-card';
+        
+        const roleNames = {
+          'super_admin': 'Super Admin',
+          'manager': 'Manager',
+          'user': 'User'
+        };
+        
+        const isSelf = user.email === currentEmail;
+        
+        userCard.innerHTML = `
+          <div class="user-info-card">
+            <strong>${user.email}</strong>
+            <span class="role-badge">${roleNames[user.role]}</span>
+            ${isSelf ? '<small style="color: var(--truline-gray);"> (You)</small>' : ''}
+          </div>
+          <div class="user-actions">
+            ${!isSelf ? `
+              <select onchange="updateUserRole('${user.email}', this.value)" class="btn-small">
+                <option value="">Change Role</option>
+                <option value="super_admin">Super Admin</option>
+                <option value="manager">Manager</option>
+                <option value="user">User</option>
+              </select>
+              <button onclick="deleteUser('${user.email}')" class="btn-danger btn-small">Delete</button>
+            ` : '<span style="color: var(--truline-gray); font-size: 13px;">Cannot modify your own account</span>'}
+          </div>
+        `;
+        usersList.appendChild(userCard);
+      });
+    }
+  } catch (error) {
+    console.error('Failed to load users:', error);
+  }
+}
+
+async function updateUserRole(email, newRole) {
+  if (!newRole) return;
+  
+  if (!confirm(`Are you sure you want to change ${email}'s role to ${newRole}?`)) {
+    return;
+  }
+  
+  try {
+    showLoading(true);
+    const response = await fetch(`/users/${encodeURIComponent(email)}/role`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ role: newRole })
+    });
+    
+    if (response.ok) {
+      alert('User role updated successfully!');
+      loadUsers();
+    } else {
+      const data = await response.json();
+      alert(`Failed to update role: ${data.detail || 'Unknown error'}`);
+    }
+  } catch (error) {
+    alert('Failed to update user role');
+  } finally {
+    showLoading(false);
+  }
+}
+
+async function deleteUser(email) {
+  const currentEmail = localStorage.getItem('user_email');
+  
+  if (email === currentEmail) {
+    alert('You cannot delete your own account');
+    return;
+  }
+  
+  if (!confirm(`Are you sure you want to delete ${email}? This action cannot be undone.`)) {
+    return;
+  }
+  
+  try {
+    showLoading(true);
+    const response = await fetch(`/users/${encodeURIComponent(email)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      alert('User deleted successfully');
+      loadUsers();
+    } else {
+      const data = await response.json();
+      alert(`Failed to delete user: ${data.detail || 'Unknown error'}`);
+    }
+  } catch (error) {
+    alert('Failed to delete user');
+  } finally {
+    showLoading(false);
+  }
 }
