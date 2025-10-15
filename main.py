@@ -33,6 +33,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
 ZAPIER_SECRET = os.getenv("ZAPIER_SECRET", "change_this_secret_in_production")
 ROOFR_WEBHOOK_URL = os.getenv("ROOFR_WEBHOOK_URL", "")
+QUICKBOOKS_SECRET = os.getenv("QUICKBOOKS_SECRET", "change_this_in_production")
 
 ADMIN_EMAIL = "fred@trulineroofing.com"
 
@@ -185,6 +186,20 @@ class RoofrUpdate(BaseModel):
     workflow_stage: Optional[str] = None
     data: Optional[dict] = None
 
+class QuickBooksWebhook(BaseModel):
+    secret: str
+    transaction_type: str  # "invoice" or "expense"
+    transaction_id: str
+    job_id: Optional[str] = None
+    amount: float
+    date: str
+    description: Optional[str] = None
+    customer_name: Optional[str] = None
+    vendor_name: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    data: Optional[dict] = None
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
@@ -324,6 +339,120 @@ async def update_roofr(update: RoofrUpdate, current_user: dict = Depends(get_cur
             "message": f"Job updated locally but failed to sync to Roofr: {str(e)}",
             "job_id": update.job_id
         }
+
+@app.post("/quickbooks/webhook")
+async def quickbooks_webhook(webhook: QuickBooksWebhook):
+    """Receive financial data (invoices/expenses) from QuickBooks via Zapier"""
+    
+    if webhook.secret != QUICKBOOKS_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid QuickBooks webhook secret")
+    
+    db = load_db()
+    
+    if "financials" not in db:
+        db["financials"] = {"invoices": {}, "expenses": {}}
+    
+    if webhook.transaction_type == "invoice":
+        if "invoices" not in db["financials"]:
+            db["financials"]["invoices"] = {}
+        
+        invoice_data = {
+            "transaction_id": webhook.transaction_id,
+            "job_id": webhook.job_id,
+            "amount": webhook.amount,
+            "date": webhook.date,
+            "description": webhook.description,
+            "customer_name": webhook.customer_name,
+            "status": webhook.status or "pending",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        if webhook.data:
+            invoice_data.update(webhook.data)
+        
+        db["financials"]["invoices"][webhook.transaction_id] = invoice_data
+        
+        if webhook.job_id and webhook.job_id in db["jobs"]:
+            if "invoices" not in db["jobs"][webhook.job_id]:
+                db["jobs"][webhook.job_id]["invoices"] = []
+            if webhook.transaction_id not in db["jobs"][webhook.job_id]["invoices"]:
+                db["jobs"][webhook.job_id]["invoices"].append(webhook.transaction_id)
+    
+    elif webhook.transaction_type == "expense":
+        if "expenses" not in db["financials"]:
+            db["financials"]["expenses"] = {}
+        
+        expense_data = {
+            "transaction_id": webhook.transaction_id,
+            "job_id": webhook.job_id,
+            "amount": webhook.amount,
+            "date": webhook.date,
+            "description": webhook.description,
+            "vendor_name": webhook.vendor_name,
+            "category": webhook.category,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        if webhook.data:
+            expense_data.update(webhook.data)
+        
+        db["financials"]["expenses"][webhook.transaction_id] = expense_data
+        
+        if webhook.job_id and webhook.job_id in db["jobs"]:
+            if "expenses" not in db["jobs"][webhook.job_id]:
+                db["jobs"][webhook.job_id]["expenses"] = []
+            if webhook.transaction_id not in db["jobs"][webhook.job_id]["expenses"]:
+                db["jobs"][webhook.job_id]["expenses"].append(webhook.transaction_id)
+    
+    else:
+        raise HTTPException(status_code=400, detail="Invalid transaction_type. Must be 'invoice' or 'expense'")
+    
+    save_db(db)
+    
+    return {
+        "status": "ok",
+        "message": f"{webhook.transaction_type.capitalize()} {webhook.transaction_id} received and linked to job {webhook.job_id}" if webhook.job_id else f"{webhook.transaction_type.capitalize()} {webhook.transaction_id} received"
+    }
+
+@app.get("/job/{job_id}/financials")
+async def get_job_financials(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """Get financial data (invoices and expenses) for a specific job - Manager/Admin only"""
+    
+    db = load_db()
+    
+    if job_id not in db["jobs"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = db["jobs"][job_id]
+    financials = db.get("financials", {"invoices": {}, "expenses": {}})
+    
+    job_invoices = []
+    for invoice_id in job.get("invoices", []):
+        if invoice_id in financials.get("invoices", {}):
+            job_invoices.append(financials["invoices"][invoice_id])
+    
+    job_expenses = []
+    for expense_id in job.get("expenses", []):
+        if expense_id in financials.get("expenses", {}):
+            job_expenses.append(financials["expenses"][expense_id])
+    
+    total_revenue = sum(inv["amount"] for inv in job_invoices if inv.get("status") != "cancelled")
+    total_costs = sum(exp["amount"] for exp in job_expenses)
+    profit = total_revenue - total_costs
+    margin = (profit / total_revenue * 100) if total_revenue > 0 else 0
+    
+    return {
+        "job_id": job_id,
+        "client_name": job.get("client_name"),
+        "invoices": job_invoices,
+        "expenses": job_expenses,
+        "summary": {
+            "total_revenue": total_revenue,
+            "total_costs": total_costs,
+            "profit": profit,
+            "margin_percent": round(margin, 2)
+        }
+    }
 
 @app.post("/documents/upload")
 async def upload_document(
