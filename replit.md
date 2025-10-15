@@ -7,15 +7,27 @@ A progressive web app (PWA) AI agent for Truline Roofing commercial roofing comp
 **Admin**: Fred Wolfe (fred@trulineroofing.com)  
 **Current Status**: Initial MVP implementation
 
-## Recent Changes (October 14, 2025)
+## Recent Changes (October 15, 2025)
+- **Implemented three-tier role-based access control (RBAC)**
+  - Super Admin: Full access including delete operations and user management
+  - Manager: View all data including financials, no delete permissions
+  - User: Field crew/sales access, no financial data visibility
+- **Enhanced AI agent with role-aware filtering**
+  - Blocks financial queries for User role
+  - Provides full data access for Manager and Super Admin roles
+- **Added comprehensive user management system**
+  - Super Admin can create, list, and update user roles
+  - Role-based UI visibility in frontend
+  - User role badge display in dashboard header
+
+## Previous Changes (October 14, 2025)
 - Created FastAPI backend with JWT authentication and AI agent integration
 - Implemented document management system with role-based access control
 - Built progressive web app frontend with offline capabilities
 - Added Zapier webhook integration for Roofr CRM synchronization with secret key verification
 - Integrated OpenAI API for AI agent functionality
 - Implemented secure JWT-based user authentication with server-side session management
-- Added admin-only controls for document deletion and user management
-- Fixed critical security issues: replaced email-based tokens with signed JWTs, added webhook secret authentication, and implemented proper role-based access control
+- Fixed critical security issues: replaced email-based tokens with signed JWTs, added webhook secret authentication
 
 ## User Preferences
 - Use personal OpenAI API key (already configured)
@@ -42,15 +54,18 @@ A progressive web app (PWA) AI agent for Truline Roofing commercial roofing comp
 - **static/logo.png**: Truline Roofing emblem
 
 ### Key Features
-1. **AI Agent Chat**: OpenAI-powered assistant for data manipulation and queries
+1. **AI Agent Chat**: OpenAI-powered assistant for data manipulation and queries (role-aware with financial data filtering)
 2. **Job Management**: View and manage jobs synced from Roofr via Zapier
-3. **Document Management**: Upload, download, and delete (admin only) company documents
+3. **Document Management**: Upload, download, and delete (super admin only) company documents
 4. **Zapier Integration**: Webhook endpoint for receiving Roofr CRM data
 5. **Progressive Web App**: Installable, offline-capable mobile/desktop app
-6. **Role-Based Access**: Admin controls for Fred Wolfe only
+6. **Three-Tier Role-Based Access Control**:
+   - **Super Admin**: Full system access, delete permissions, user management
+   - **Manager**: View all data including financials, no delete permissions
+   - **User**: Field crew/sales access, no financial data visibility
 
 ### API Endpoints
-- `POST /login`: User authentication (returns JWT token)
+- `POST /login`: User authentication (returns JWT token with role)
 - `GET /jobs`: Get all jobs (requires JWT)
 - `POST /job`: Add/update job (requires JWT)
 - `GET /job/{job_id}`: Get specific job (requires JWT)
@@ -58,17 +73,20 @@ A progressive web app (PWA) AI agent for Truline Roofing commercial roofing comp
 - `POST /documents/upload`: Upload document (requires JWT)
 - `GET /documents`: List all documents (requires JWT)
 - `GET /documents/{doc_id}/download`: Download document (requires JWT)
-- `DELETE /documents/{doc_id}`: Delete document (admin only, requires JWT)
-- `POST /chat`: Send message to AI agent (requires JWT)
+- `DELETE /documents/{doc_id}`: Delete document (super admin only, requires JWT)
+- `POST /chat`: Send message to AI agent (role-aware, requires JWT)
 - `GET /chat/history`: Get chat history (requires JWT)
 - `POST /ai/action`: Execute AI actions on data (requires JWT)
-- `DELETE /users/{email}`: Remove user access (admin only, requires JWT)
-- `GET /admin/webhook-info`: Get webhook configuration (admin only, requires JWT)
+- `POST /users`: Create new user (super admin only, requires JWT)
+- `GET /users`: List all users (super admin only, requires JWT)
+- `PUT /users/{email}/role`: Update user role (super admin only, requires JWT)
+- `DELETE /users/{email}`: Remove user access (super admin only, requires JWT)
+- `GET /admin/webhook-info`: Get webhook configuration (super admin only, requires JWT)
 
 ### User Accounts
-- **fred@trulineroofing.com**: Admin (password: truline2024)
-- **fieldcrew@trulineroofing.com**: Field crew (password: roof123)
-- **office@trulineroofing.com**: Office staff (password: office123)
+- **fred@trulineroofing.com**: Super Admin (password: truline2024) - Full access, can delete and manage users
+- **office@trulineroofing.com**: Manager (password: office123) - View all data including financials, cannot delete
+- **fieldcrew@trulineroofing.com**: User (password: roof123) - Field crew/sales access, no financial visibility
 
 ## Technology Stack
 - **Backend**: FastAPI, Uvicorn, python-jose (JWT)

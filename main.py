@@ -40,26 +40,51 @@ db_file = "db.json"
 def load_db():
     if os.path.exists(db_file):
         with open(db_file, 'r') as f:
-            return json.load(f)
+            db = json.load(f)
+        
+        needs_migration = False
+        
+        if "financials" not in db:
+            db["financials"] = {}
+            needs_migration = True
+        
+        for email, user_data in db.get("users", {}).items():
+            if "is_admin" in user_data and "role" not in user_data:
+                if user_data["is_admin"]:
+                    user_data["role"] = "super_admin"
+                else:
+                    if email == "office@trulineroofing.com":
+                        user_data["role"] = "manager"
+                    else:
+                        user_data["role"] = "user"
+                del user_data["is_admin"]
+                needs_migration = True
+        
+        if needs_migration:
+            save_db(db)
+        
+        return db
+    
     return {
         "jobs": {},
         "documents": {},
         "chat_history": {},
+        "financials": {},
         "users": {
             "fred@trulineroofing.com": {
                 "email": "fred@trulineroofing.com",
                 "password_hash": hashlib.sha256(b"truline2024").hexdigest(),
-                "is_admin": True
+                "role": "super_admin"
             },
             "fieldcrew@trulineroofing.com": {
                 "email": "fieldcrew@trulineroofing.com",
                 "password_hash": hashlib.sha256(b"roof123").hexdigest(),
-                "is_admin": False
+                "role": "user"
             },
             "office@trulineroofing.com": {
                 "email": "office@trulineroofing.com",
                 "password_hash": hashlib.sha256(b"office123").hexdigest(),
-                "is_admin": False
+                "role": "manager"
             }
         }
     }
@@ -101,10 +126,21 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError:
         raise credentials_exception
 
-async def get_admin_user(current_user: dict = Depends(get_current_user)):
-    if not current_user.get("is_admin", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
+async def get_super_admin(current_user: dict = Depends(get_current_user)):
+    """Only super_admin (Fred) can access"""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin access required")
     return current_user
+
+async def get_manager_or_above(current_user: dict = Depends(get_current_user)):
+    """Manager and super_admin can access"""
+    if current_user.get("role") not in ["super_admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Manager access required")
+    return current_user
+
+async def get_admin_user(current_user: dict = Depends(get_current_user)):
+    """Legacy: Alias for super_admin"""
+    return await get_super_admin(current_user)
 
 class Login(BaseModel):
     email: str
@@ -133,6 +169,14 @@ class AIAction(BaseModel):
     action: str
     parameters: dict
 
+class NewUser(BaseModel):
+    email: str
+    password: str
+    role: str
+
+class UpdateRole(BaseModel):
+    role: str
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
@@ -151,14 +195,15 @@ async def login(data: Login):
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["email"], "is_admin": user.get("is_admin", False)},
+        data={"sub": user["email"], "role": user.get("role", "user")},
         expires_delta=access_token_expires
     )
     
     return {
         "status": "ok",
         "token": access_token,
-        "is_admin": user.get("is_admin", False)
+        "role": user.get("role", "user"),
+        "is_admin": user.get("role") == "super_admin"
     }
 
 @app.post("/job")
@@ -315,23 +360,51 @@ async def chat(message: ChatMessage, current_user: dict = Depends(get_current_us
         "timestamp": datetime.now().isoformat()
     })
     
-    system_prompt = f"""You are an AI assistant for Truline Roofing, a commercial roofing company. 
-You help users manage jobs, documents, and CRM data from Roofr.
+    user_role = current_user.get("role", "user")
+    
+    if user_role == "user":
+        system_prompt = f"""You are an AI assistant for Truline Roofing, a commercial roofing company. 
+You help field crew and sales people with job information and administrative tasks.
 
 Current available data:
 - Jobs: {json.dumps(db['jobs'], indent=2)}
 - Documents: {json.dumps(db['documents'], indent=2)}
 
 You can help with:
-- Viewing and summarizing job details
-- Providing information about documents
-- Answering questions about roofing projects
-- Creating reports and summaries
+- Viewing job details and status
+- Uploading job photos
+- Sending emails and text messages
+- General roofing project questions
 
-When users ask you to update job status, add notes, or manipulate data, explain what you would do but note that direct data manipulation requires additional implementation. Provide detailed, helpful responses about the current state of jobs and documents.
+IMPORTANT RESTRICTIONS for this user role:
+- You MUST NOT provide any financial information (invoices, costs, profits, expenses, purchase orders)
+- If asked about financials, politely respond: "You don't have access to financial data. Please contact your manager."
+- Focus on operational and customer-facing tasks only
 
 User: {user_email}
-Is Admin: {current_user.get('is_admin', False)}
+Role: Field Crew / Sales (Limited Access)
+"""
+    else:
+        financials_data = "" if user_role == "user" else f"\n- Financials: {json.dumps(db.get('financials', {}), indent=2)}"
+        
+        system_prompt = f"""You are an AI assistant for Truline Roofing, a commercial roofing company. 
+You help manage jobs, documents, financials, and CRM data from Roofr.
+
+Current available data:
+- Jobs: {json.dumps(db['jobs'], indent=2)}
+- Documents: {json.dumps(db['documents'], indent=2)}{financials_data}
+
+You can help with:
+- Viewing and summarizing job details and financials
+- Calculating profitability per job
+- Providing information about documents
+- Answering questions about roofing projects
+- Creating financial reports and summaries
+
+You have full access to all company data including financial information.
+
+User: {user_email}
+Role: {"Super Admin (Full Access)" if user_role == "super_admin" else "Manager (View All)"}
 """
     
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -391,6 +464,56 @@ async def get_webhook_info(current_user: dict = Depends(get_admin_user)):
         "secret": ZAPIER_SECRET,
         "instructions": "Include the 'secret' field in your Zapier webhook payload"
     }
+
+@app.post("/users")
+async def create_user(user_data: NewUser, current_user: dict = Depends(get_super_admin)):
+    """Create a new user - Super Admin only"""
+    db = load_db()
+    
+    if user_data.email in db["users"]:
+        raise HTTPException(status_code=400, detail="User already exists")
+    
+    if user_data.role not in ["super_admin", "manager", "user"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be: super_admin, manager, or user")
+    
+    db["users"][user_data.email] = {
+        "email": user_data.email,
+        "password_hash": hashlib.sha256(user_data.password.encode()).hexdigest(),
+        "role": user_data.role
+    }
+    save_db(db)
+    
+    return {"status": "ok", "message": f"User {user_data.email} created with role {user_data.role}"}
+
+@app.get("/users")
+async def list_users(current_user: dict = Depends(get_super_admin)):
+    """List all users - Super Admin only"""
+    db = load_db()
+    users_list = []
+    for email, user_data in db["users"].items():
+        users_list.append({
+            "email": email,
+            "role": user_data.get("role", "user")
+        })
+    return {"users": users_list}
+
+@app.put("/users/{email}/role")
+async def update_user_role(email: str, role_data: UpdateRole, current_user: dict = Depends(get_super_admin)):
+    """Update user role - Super Admin only"""
+    if email == ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="Cannot change super admin role")
+    
+    if role_data.role not in ["super_admin", "manager", "user"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be: super_admin, manager, or user")
+    
+    db = load_db()
+    if email not in db["users"]:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    db["users"][email]["role"] = role_data.role
+    save_db(db)
+    
+    return {"status": "ok", "message": f"User {email} role updated to {role_data.role}"}
 
 if __name__ == "__main__":
     import uvicorn

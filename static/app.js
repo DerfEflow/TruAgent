@@ -1,5 +1,17 @@
 let token = localStorage.getItem('token');
-let isAdmin = localStorage.getItem('is_admin') === 'true';
+let userRole = localStorage.getItem('user_role') || 'user';
+
+function isSuperAdmin() {
+  return userRole === 'super_admin';
+}
+
+function isManagerOrAbove() {
+  return userRole === 'super_admin' || userRole === 'manager';
+}
+
+function isUser() {
+  return userRole === 'user';
+}
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/static/service-worker.js')
@@ -23,11 +35,32 @@ function showLogin() {
 function showDashboard() {
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('dashboard-screen').classList.remove('hidden');
-  document.getElementById('user-email').textContent = token;
   
-  if (isAdmin) {
+  const userEmail = localStorage.getItem('user_email') || 'User';
+  document.getElementById('user-email').textContent = userEmail;
+  
+  const roleDisplay = document.getElementById('user-role-display');
+  if (roleDisplay) {
+    const roleNames = {
+      'super_admin': 'Super Admin',
+      'manager': 'Manager',
+      'user': 'Field Crew/Sales'
+    };
+    roleDisplay.textContent = roleNames[userRole] || 'User';
+  }
+  
+  if (isSuperAdmin()) {
     document.querySelectorAll('.admin-only').forEach(el => el.classList.remove('hidden'));
+    document.querySelectorAll('.super-admin-only').forEach(el => el.classList.remove('hidden'));
     loadWebhookInfo();
+  }
+  
+  if (isManagerOrAbove()) {
+    document.querySelectorAll('.manager-only').forEach(el => el.classList.remove('hidden'));
+  }
+  
+  if (isUser()) {
+    document.querySelectorAll('.hide-for-user').forEach(el => el.classList.add('hidden'));
   }
   
   loadChatHistory();
@@ -51,9 +84,10 @@ async function login() {
     if (response.ok) {
       const data = await response.json();
       localStorage.setItem('token', data.token);
-      localStorage.setItem('is_admin', data.is_admin);
+      localStorage.setItem('user_role', data.role);
+      localStorage.setItem('user_email', email);
       token = data.token;
-      isAdmin = data.is_admin;
+      userRole = data.role;
       errorDiv.textContent = '';
       showDashboard();
     } else {
@@ -68,9 +102,10 @@ async function login() {
 
 function logout() {
   localStorage.removeItem('token');
-  localStorage.removeItem('is_admin');
+  localStorage.removeItem('user_role');
+  localStorage.removeItem('user_email');
   token = null;
-  isAdmin = false;
+  userRole = 'user';
   showLogin();
 }
 
@@ -243,7 +278,7 @@ async function refreshDocuments() {
             <p><strong>By:</strong> ${doc.uploaded_by}</p>
             <div class="document-actions">
               <button onclick="downloadDocument('${doc.id}')" class="btn-secondary btn-small">Download</button>
-              ${isAdmin ? `<button onclick="deleteDocument('${doc.id}')" class="btn-danger btn-small">Delete</button>` : ''}
+              ${isSuperAdmin() ? `<button onclick="deleteDocument('${doc.id}')" class="btn-danger btn-small">Delete</button>` : ''}
             </div>
           `;
           documentsList.appendChild(docCard);
