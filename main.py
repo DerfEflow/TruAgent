@@ -34,6 +34,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480
 ZAPIER_SECRET = os.getenv("ZAPIER_SECRET", "change_this_secret_in_production")
 ROOFR_WEBHOOK_URL = os.getenv("ROOFR_WEBHOOK_URL", "")
 QUICKBOOKS_SECRET = os.getenv("QUICKBOOKS_SECRET", "change_this_in_production")
+EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")
+SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
 
 ADMIN_EMAIL = "fred@trulineroofing.com"
 
@@ -199,6 +201,17 @@ class QuickBooksWebhook(BaseModel):
     category: Optional[str] = None
     status: Optional[str] = None
     data: Optional[dict] = None
+
+class EmailMessage(BaseModel):
+    to: str
+    subject: str
+    body: str
+    html: Optional[str] = None
+    document_ids: Optional[List[str]] = []
+
+class SMSMessage(BaseModel):
+    to: str
+    message: str
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -454,6 +467,83 @@ async def get_job_financials(job_id: str, current_user: dict = Depends(get_manag
         }
     }
 
+@app.post("/send-email")
+async def send_email(email: EmailMessage, current_user: dict = Depends(get_current_user)):
+    """Send email via Zapier webhook integration (supports Gmail, SendGrid, etc.)"""
+    
+    if not EMAIL_WEBHOOK_URL:
+        raise HTTPException(status_code=503, detail="Email service not configured")
+    
+    db = load_db()
+    
+    attachments = []
+    if email.document_ids:
+        for doc_id in email.document_ids:
+            if doc_id in db["documents"]:
+                doc = db["documents"][doc_id]
+                try:
+                    import base64
+                    with open(doc["filepath"], "rb") as f:
+                        file_content = f.read()
+                        base64_content = base64.b64encode(file_content).decode()
+                        attachments.append({
+                            "filename": doc["filename"],
+                            "content": base64_content,
+                            "contentType": "application/octet-stream"
+                        })
+                except Exception as e:
+                    pass
+    
+    payload = {
+        "to": email.to,
+        "subject": email.subject,
+        "body": email.body,
+        "html": email.html,
+        "attachments": attachments if attachments else None,
+        "sent_by": current_user["email"],
+        "sent_at": datetime.now().isoformat()
+    }
+    
+    try:
+        import requests
+        response = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        return {
+            "status": "ok",
+            "message": f"Email sent to {email.to}",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+@app.post("/send-sms")
+async def send_sms(sms: SMSMessage, current_user: dict = Depends(get_current_user)):
+    """Send SMS via Zapier webhook integration (supports Twilio, etc.)"""
+    
+    if not SMS_WEBHOOK_URL:
+        raise HTTPException(status_code=503, detail="SMS service not configured")
+    
+    payload = {
+        "to": sms.to,
+        "message": sms.message,
+        "sent_by": current_user["email"],
+        "sent_at": datetime.now().isoformat()
+    }
+    
+    try:
+        import requests
+        response = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        return {
+            "status": "ok",
+            "message": f"SMS sent to {sms.to}",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
+
 @app.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -606,6 +696,74 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
     elif action.action == "list_documents":
         return {"status": "ok", "documents": db["documents"]}
     
+    elif action.action == "send_email":
+        to = action.parameters.get("to")
+        subject = action.parameters.get("subject")
+        body = action.parameters.get("body")
+        html = action.parameters.get("html")
+        doc_ids = action.parameters.get("document_ids", [])
+        
+        if not EMAIL_WEBHOOK_URL:
+            return {"status": "error", "message": "Email service not configured"}
+        
+        attachments = []
+        if doc_ids:
+            for doc_id in doc_ids:
+                if doc_id in db["documents"]:
+                    doc = db["documents"][doc_id]
+                    try:
+                        import base64
+                        with open(doc["filepath"], "rb") as f:
+                            file_content = f.read()
+                            base64_content = base64.b64encode(file_content).decode()
+                            attachments.append({
+                                "filename": doc["filename"],
+                                "content": base64_content,
+                                "contentType": "application/octet-stream"
+                            })
+                    except:
+                        pass
+        
+        payload = {
+            "to": to,
+            "subject": subject,
+            "body": body,
+            "html": html,
+            "attachments": attachments if attachments else None,
+            "sent_by": current_user["email"],
+            "sent_at": datetime.now().isoformat()
+        }
+        
+        try:
+            import requests
+            response = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
+            response.raise_for_status()
+            return {"status": "ok", "message": f"Email sent to {to}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to send email: {str(e)}"}
+    
+    elif action.action == "send_sms":
+        to = action.parameters.get("to")
+        message = action.parameters.get("message")
+        
+        if not SMS_WEBHOOK_URL:
+            return {"status": "error", "message": "SMS service not configured"}
+        
+        payload = {
+            "to": to,
+            "message": message,
+            "sent_by": current_user["email"],
+            "sent_at": datetime.now().isoformat()
+        }
+        
+        try:
+            import requests
+            response = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
+            response.raise_for_status()
+            return {"status": "ok", "message": f"SMS sent to {to}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to send SMS: {str(e)}"}
+    
     return {"status": "error", "message": "Unknown action"}
 
 @app.post("/chat")
@@ -637,8 +795,15 @@ You can help with:
 - Updating job status (automatically syncs to Roofr CRM)
 - Adding notes to jobs (automatically syncs to Roofr CRM)
 - Uploading job photos
-- Sending emails and text messages
+- Sending emails (with document attachments)
+- Sending SMS text messages
 - General roofing project questions
+
+COMMUNICATION CAPABILITIES:
+- Send emails to customers with subject, body, and optional document attachments
+- Send SMS text messages for quick notifications
+- Attach documents from the document library to emails
+- All communications are tracked with sender and timestamp
 
 IMPORTANT RESTRICTIONS for this user role:
 - You MUST NOT provide any financial information (invoices, costs, profits, expenses, purchase orders)
@@ -667,16 +832,30 @@ You can help with:
 - Viewing and summarizing job details and financials
 - Updating job status and workflow stages (automatically syncs to Roofr CRM)
 - Adding notes to jobs (automatically syncs to Roofr CRM)
-- Calculating profitability per job
+- Calculating profitability per job (revenue - costs = profit, margin %)
 - Providing information about documents
+- Sending emails (with document attachments)
+- Sending SMS text messages
 - Answering questions about roofing projects
 - Creating financial reports and summaries
+
+COMMUNICATION CAPABILITIES:
+- Send emails to customers, vendors, or crew with subject, body, and document attachments
+- Send SMS text messages for urgent notifications
+- Attach invoices, estimates, or reports from document library
+- All communications tracked with sender and timestamp
 
 BI-DIRECTIONAL CRM SYNC:
 - When you update job status or add notes, changes automatically sync to Roofr CRM
 - You can move jobs through workflow stages (Lead → Quote → Approved → In Progress → Complete)
 - All updates are tracked with user email and timestamp
 - Use workflow_stage parameter to move jobs through sales pipeline
+
+FINANCIAL DATA ACCESS:
+- Full access to invoices and expenses from QuickBooks
+- Calculate job profitability: total revenue - total costs = profit
+- Compute profit margins: (profit / revenue) × 100
+- Track financial performance across all jobs
 
 You have full access to all company data including financial information.
 
