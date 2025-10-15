@@ -32,6 +32,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
 ZAPIER_SECRET = os.getenv("ZAPIER_SECRET", "change_this_secret_in_production")
+ROOFR_WEBHOOK_URL = os.getenv("ROOFR_WEBHOOK_URL", "")
 
 ADMIN_EMAIL = "fred@trulineroofing.com"
 
@@ -177,6 +178,13 @@ class NewUser(BaseModel):
 class UpdateRole(BaseModel):
     role: str
 
+class RoofrUpdate(BaseModel):
+    job_id: str
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    workflow_stage: Optional[str] = None
+    data: Optional[dict] = None
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
@@ -249,6 +257,74 @@ async def zapier_webhook(webhook: ZapierWebhook):
     save_db(db)
     return {"status": "ok", "message": "Webhook received"}
 
+@app.post("/roofr/update")
+async def update_roofr(update: RoofrUpdate, current_user: dict = Depends(get_current_user)):
+    """Send job updates to Roofr via Zapier webhook (bi-directional sync)"""
+    
+    if not ROOFR_WEBHOOK_URL:
+        raise HTTPException(status_code=503, detail="Roofr webhook URL not configured")
+    
+    db = load_db()
+    
+    if update.job_id not in db["jobs"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = db["jobs"][update.job_id]
+    
+    if update.status:
+        job["status"] = update.status
+    
+    if update.notes:
+        if "notes" not in job:
+            job["notes"] = []
+        job["notes"].append({
+            "note": update.notes,
+            "added_by": current_user["email"],
+            "added_at": datetime.now().isoformat()
+        })
+    
+    if update.workflow_stage:
+        job["workflow_stage"] = update.workflow_stage
+    
+    if update.data:
+        job.update(update.data)
+    
+    save_db(db)
+    
+    payload = {
+        "job_id": update.job_id,
+        "status": job.get("status"),
+        "workflow_stage": job.get("workflow_stage"),
+        "client_name": job.get("client_name"),
+        "address": job.get("address"),
+        "updated_by": current_user["email"],
+        "updated_at": datetime.now().isoformat()
+    }
+    
+    if update.notes:
+        payload["new_note"] = update.notes
+    
+    if update.data:
+        payload.update(update.data)
+    
+    try:
+        import requests
+        response = requests.post(ROOFR_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        return {
+            "status": "ok",
+            "message": "Job updated locally and synced to Roofr",
+            "job_id": update.job_id,
+            "roofr_response": response.status_code
+        }
+    except Exception as e:
+        return {
+            "status": "partial",
+            "message": f"Job updated locally but failed to sync to Roofr: {str(e)}",
+            "job_id": update.job_id
+        }
+
 @app.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -315,10 +391,39 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
     if action.action == "update_job_status":
         job_id = action.parameters.get("job_id")
         new_status = action.parameters.get("status")
+        workflow_stage = action.parameters.get("workflow_stage")
+        
         if job_id in db["jobs"]:
             db["jobs"][job_id]["status"] = new_status
+            if workflow_stage:
+                db["jobs"][job_id]["workflow_stage"] = workflow_stage
             save_db(db)
-            return {"status": "ok", "message": f"Job {job_id} status updated to {new_status}"}
+            
+            sync_status = "not configured"
+            if ROOFR_WEBHOOK_URL:
+                try:
+                    import requests
+                    payload = {
+                        "job_id": job_id,
+                        "status": new_status,
+                        "workflow_stage": workflow_stage,
+                        "client_name": db["jobs"][job_id].get("client_name"),
+                        "address": db["jobs"][job_id].get("address"),
+                        "updated_by": current_user["email"],
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    response = requests.post(ROOFR_WEBHOOK_URL, json=payload, timeout=10)
+                    response.raise_for_status()
+                    sync_status = "synced"
+                except Exception as e:
+                    sync_status = f"sync failed: {str(e)}"
+            
+            if sync_status == "synced":
+                return {"status": "ok", "message": f"Job {job_id} status updated to {new_status} and synced to Roofr"}
+            elif sync_status == "not configured":
+                return {"status": "ok", "message": f"Job {job_id} status updated to {new_status} (Roofr sync not configured)"}
+            else:
+                return {"status": "partial", "message": f"Job {job_id} status updated locally but Roofr {sync_status}"}
         return {"status": "error", "message": "Job not found"}
     
     elif action.action == "add_job_note":
@@ -327,9 +432,37 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
         if job_id in db["jobs"]:
             if "notes" not in db["jobs"][job_id]:
                 db["jobs"][job_id]["notes"] = []
-            db["jobs"][job_id]["notes"].append(note)
+            db["jobs"][job_id]["notes"].append({
+                "note": note,
+                "added_by": current_user["email"],
+                "added_at": datetime.now().isoformat()
+            })
             save_db(db)
-            return {"status": "ok", "message": f"Note added to job {job_id}"}
+            
+            sync_status = "not configured"
+            if ROOFR_WEBHOOK_URL:
+                try:
+                    import requests
+                    payload = {
+                        "job_id": job_id,
+                        "new_note": note,
+                        "client_name": db["jobs"][job_id].get("client_name"),
+                        "address": db["jobs"][job_id].get("address"),
+                        "updated_by": current_user["email"],
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    response = requests.post(ROOFR_WEBHOOK_URL, json=payload, timeout=10)
+                    response.raise_for_status()
+                    sync_status = "synced"
+                except Exception as e:
+                    sync_status = f"sync failed: {str(e)}"
+            
+            if sync_status == "synced":
+                return {"status": "ok", "message": f"Note added to job {job_id} and synced to Roofr"}
+            elif sync_status == "not configured":
+                return {"status": "ok", "message": f"Note added to job {job_id} (Roofr sync not configured)"}
+            else:
+                return {"status": "partial", "message": f"Note added to job {job_id} locally but Roofr {sync_status}"}
         return {"status": "error", "message": "Job not found"}
     
     elif action.action == "list_jobs":
@@ -372,6 +505,8 @@ Current available data:
 
 You can help with:
 - Viewing job details and status
+- Updating job status (automatically syncs to Roofr CRM)
+- Adding notes to jobs (automatically syncs to Roofr CRM)
 - Uploading job photos
 - Sending emails and text messages
 - General roofing project questions
@@ -380,6 +515,11 @@ IMPORTANT RESTRICTIONS for this user role:
 - You MUST NOT provide any financial information (invoices, costs, profits, expenses, purchase orders)
 - If asked about financials, politely respond: "You don't have access to financial data. Please contact your manager."
 - Focus on operational and customer-facing tasks only
+
+BI-DIRECTIONAL CRM SYNC:
+- When you update job status or add notes, changes automatically sync to Roofr CRM
+- You can move jobs through workflow stages (Lead → Quote → Approved → In Progress → Complete)
+- All updates are tracked with user email and timestamp
 
 User: {user_email}
 Role: Field Crew / Sales (Limited Access)
@@ -396,10 +536,18 @@ Current available data:
 
 You can help with:
 - Viewing and summarizing job details and financials
+- Updating job status and workflow stages (automatically syncs to Roofr CRM)
+- Adding notes to jobs (automatically syncs to Roofr CRM)
 - Calculating profitability per job
 - Providing information about documents
 - Answering questions about roofing projects
 - Creating financial reports and summaries
+
+BI-DIRECTIONAL CRM SYNC:
+- When you update job status or add notes, changes automatically sync to Roofr CRM
+- You can move jobs through workflow stages (Lead → Quote → Approved → In Progress → Complete)
+- All updates are tracked with user email and timestamp
+- Use workflow_stage parameter to move jobs through sales pipeline
 
 You have full access to all company data including financial information.
 
