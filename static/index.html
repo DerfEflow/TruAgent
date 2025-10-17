@@ -42,6 +42,7 @@
       <button class="tab active" onclick="showTab('ai-agent')">AI Agent</button>
       <button class="tab" onclick="showTab('jobs')">Jobs</button>
       <button class="tab" onclick="showTab('documents')">Documents</button>
+      <button class="tab manager-only hidden" onclick="showTab('financials')">Financials</button>
       <button class="tab admin-only hidden" onclick="showTab('admin')">Admin</button>
     </nav>
 
@@ -75,6 +76,22 @@
           <input type="file" id="file-upload" style="display: none" onchange="uploadDocument()">
         </div>
         <div id="documents-list" class="documents-list"></div>
+      </div>
+
+      <div id="financials-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Job Profitability Reports</h2>
+          <button onclick="refreshFinancials()" class="btn-secondary">Refresh</button>
+        </div>
+        <div class="financials-controls">
+          <label for="job-select">Select Job:</label>
+          <select id="job-select" onchange="loadJobFinancials()">
+            <option value="">-- Select a job --</option>
+          </select>
+        </div>
+        <div id="financials-content">
+          <p class="help-text">Select a job to view its financial profitability report.</p>
+        </div>
       </div>
 
       <div id="admin-tab" class="tab-content admin-only">

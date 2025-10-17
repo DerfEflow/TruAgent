@@ -118,6 +118,7 @@ function showTab(tabName) {
   
   if (tabName === 'jobs') refreshJobs();
   if (tabName === 'documents') refreshDocuments();
+  if (tabName === 'financials') refreshFinancials();
   if (tabName === 'admin') loadUsers();
 }
 
@@ -557,4 +558,159 @@ async function deleteUser(email) {
   } finally {
     showLoading(false);
   }
+}
+
+async function refreshFinancials() {
+  if (!isManagerOrAbove()) return;
+  
+  try {
+    showLoading(true);
+    const response = await fetch('/jobs', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      const jobs = Object.values(data.jobs || {});
+      const jobSelect = document.getElementById('job-select');
+      jobSelect.innerHTML = '<option value="">-- Select a job --</option>';
+      
+      if (jobs.length > 0) {
+        jobs.forEach(job => {
+          const option = document.createElement('option');
+          option.value = job.job_id;
+          option.textContent = `${job.job_id} - ${job.client_name || 'Unknown'}`;
+          jobSelect.appendChild(option);
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load jobs for financials:', error);
+  } finally {
+    showLoading(false);
+  }
+}
+
+async function loadJobFinancials() {
+  const jobId = document.getElementById('job-select').value;
+  const contentDiv = document.getElementById('financials-content');
+  
+  if (!jobId) {
+    contentDiv.innerHTML = '<p class="help-text">Select a job to view its financial profitability report.</p>';
+    return;
+  }
+  
+  try {
+    showLoading(true);
+    const response = await fetch(`/job/${encodeURIComponent(jobId)}/financials`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      displayFinancialReport(data);
+    } else if (response.status === 403) {
+      contentDiv.innerHTML = '<p class="error-message">You do not have permission to view financial data.</p>';
+    } else {
+      const error = await response.json();
+      contentDiv.innerHTML = `<p class="error-message">${error.detail || 'Failed to load financial data'}</p>`;
+    }
+  } catch (error) {
+    contentDiv.innerHTML = '<p class="error-message">Failed to load financial data. Please try again.</p>';
+  } finally {
+    showLoading(false);
+  }
+}
+
+function displayFinancialReport(data) {
+  const contentDiv = document.getElementById('financials-content');
+  const summary = data.summary;
+  
+  let html = `
+    <div class="financial-report">
+      <div class="report-header">
+        <h3>${data.job_id} - ${data.client_name || 'Unknown Client'}</h3>
+      </div>
+      
+      <div class="financial-summary">
+        <div class="summary-card revenue">
+          <div class="summary-label">Total Revenue</div>
+          <div class="summary-value">$${summary.total_revenue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+          <div class="summary-detail">${data.invoices.length} invoice(s)</div>
+        </div>
+        
+        <div class="summary-card costs">
+          <div class="summary-label">Total Costs</div>
+          <div class="summary-value">$${summary.total_costs.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+          <div class="summary-detail">${data.expenses.length} expense(s)</div>
+        </div>
+        
+        <div class="summary-card profit ${summary.profit >= 0 ? 'positive' : 'negative'}">
+          <div class="summary-label">Net Profit</div>
+          <div class="summary-value">$${summary.profit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+          <div class="summary-detail">${summary.margin_percent.toFixed(2)}% margin</div>
+        </div>
+      </div>
+      
+      <div class="financial-details">
+        <div class="financial-section">
+          <h4>Invoices (${data.invoices.length})</h4>
+          ${data.invoices.length > 0 ? `
+            <table class="financial-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Invoice ID</th>
+                  <th>Customer</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${data.invoices.map(inv => `
+                  <tr>
+                    <td>${inv.date || 'N/A'}</td>
+                    <td>${inv.transaction_id}</td>
+                    <td>${inv.customer_name || 'N/A'}</td>
+                    <td>$${parseFloat(inv.amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                    <td><span class="status-badge">${inv.status || 'N/A'}</span></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : '<p class="help-text">No invoices recorded for this job.</p>'}
+        </div>
+        
+        <div class="financial-section">
+          <h4>Expenses (${data.expenses.length})</h4>
+          ${data.expenses.length > 0 ? `
+            <table class="financial-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Expense ID</th>
+                  <th>Vendor</th>
+                  <th>Category</th>
+                  <th>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${data.expenses.map(exp => `
+                  <tr>
+                    <td>${exp.date || 'N/A'}</td>
+                    <td>${exp.transaction_id}</td>
+                    <td>${exp.vendor_name || 'N/A'}</td>
+                    <td>${exp.category || 'N/A'}</td>
+                    <td>$${parseFloat(exp.amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : '<p class="help-text">No expenses recorded for this job.</p>'}
+        </div>
+      </div>
+    </div>
+  `;
+  
+  contentDiv.innerHTML = html;
 }
