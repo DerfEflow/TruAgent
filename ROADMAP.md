@@ -36,10 +36,10 @@ info + user management). The front end is a clean single-page PWA.
 - [x] Confirm it runs: all 3 logins, role gating, dormant integrations, errors.
 - [x] Context hygiene (`.claude/settings.json`), docs, ROADMAP, DECISIONS.
 
-## Phase 1 — Correctness polish (small, safe)
-- [ ] Jobs tab: guard against a job with no `status` (avoids a render crash).
-- [ ] Jobs tab: render note text properly (notes can be objects, not strings).
-- [ ] Re-test the Jobs tab with a sample synced job.
+## Phase 1 — Correctness polish (small, safe) (DONE)
+- [x] Jobs tab: guard against a job with no `status` (avoids a render crash).
+- [x] Jobs tab: render note text properly (notes can be objects, not strings).
+- [x] Re-test the Jobs tab with a sample synced job.
 
 ## Phase 2 — Review-readiness niceties (optional, only if time)
 - [ ] Light "demo mode" hint somewhere so reviewers know integrations are off.

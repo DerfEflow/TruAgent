@@ -236,14 +236,20 @@ async function refreshJobs() {
         jobsList.innerHTML = '<p style="color: var(--truline-gray);">No jobs found. Jobs will appear here when synced from Roofr via Zapier.</p>';
       } else {
         jobs.forEach(job => {
+          const status = job.status || 'Unknown';
+          const statusClass = status.toLowerCase().replace(/\s+/g, '-');
+          const notesText = (job.notes || [])
+            .map(n => (typeof n === 'string' ? n : (n && n.note) ? n.note : ''))
+            .filter(Boolean)
+            .join('; ');
           const jobCard = document.createElement('div');
           jobCard.className = 'job-card';
           jobCard.innerHTML = `
             <h3>${job.client_name || 'N/A'}</h3>
-            <p><strong>Job ID:</strong> ${job.job_id}</p>
+            <p><strong>Job ID:</strong> ${job.job_id || 'N/A'}</p>
             <p><strong>Address:</strong> ${job.address || 'N/A'}</p>
-            <p><strong>Status:</strong> <span class="status-badge status-${job.status.toLowerCase().replace(' ', '-')}">${job.status}</span></p>
-            ${job.notes && job.notes.length > 0 ? `<p><strong>Notes:</strong> ${job.notes.join(', ')}</p>` : ''}
+            <p><strong>Status:</strong> <span class="status-badge status-${statusClass}">${status}</span></p>
+            ${notesText ? `<p><strong>Notes:</strong> ${notesText}</p>` : ''}
           `;
           jobsList.appendChild(jobCard);
         });
