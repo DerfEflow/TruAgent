@@ -1,7 +1,7 @@
 [project]
-name = "repl-nix-workspace"
+name = "truagent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Truline Roofing AI Agent — internal business-operations PWA"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.119.0",

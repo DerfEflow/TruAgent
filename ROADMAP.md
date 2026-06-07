@@ -41,9 +41,12 @@ info + user management). The front end is a clean single-page PWA.
 - [x] Jobs tab: render note text properly (notes can be objects, not strings).
 - [x] Re-test the Jobs tab with a sample synced job.
 
-## Phase 2 — Review-readiness niceties (optional, only if time)
+## Phase 2 — Review-readiness niceties (optional)
+- [x] Confirm branding is consistently "Truline Roofing" across all screens
+      (user-facing all correct; fixed the internal project name in pyproject).
 - [ ] Light "demo mode" hint somewhere so reviewers know integrations are off.
-- [ ] Confirm branding is consistently "Truline Roofing" across all screens.
+      (Skipped: app already shows clear "not configured" states; this is a
+      taste tweak Fred can request during review.)
 
 ## Pre-launch tasks (NOT now — these need Fred / cost money / go live)
 - [ ] Replace the three demo passwords with real ones; set a real
