@@ -12,6 +12,11 @@ import secrets
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# Load environment variables from a local .env file (if present) so the app
+# can be configured without setting OS-level environment variables.
+load_dotenv()
 
 app = FastAPI()
 
@@ -25,7 +30,20 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# The OpenAI client is created lazily so the app can boot and be reviewed
+# without an API key. AI features stay dormant until OPENAI_API_KEY is set.
+_openai_client = None
+
+def get_openai_client():
+    """Return a cached OpenAI client, or None if no API key is configured."""
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 SECRET_KEY = os.getenv("SESSION_SECRET", secrets.token_urlsafe(32))
 ALGORITHM = "HS256"
@@ -769,11 +787,19 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
 @app.post("/chat")
 async def chat(message: ChatMessage, current_user: dict = Depends(get_current_user)):
     db = load_db()
-    
+
+    client = get_openai_client()
+    if client is None:
+        return {
+            "response": "The AI assistant isn't configured yet. An administrator "
+                        "needs to add an OpenAI API key before I can answer. "
+                        "Everything else in the app works normally in the meantime."
+        }
+
     user_email = current_user["email"]
     if user_email not in db["chat_history"]:
         db["chat_history"][user_email] = []
-    
+
     db["chat_history"][user_email].append({
         "role": "user",
         "content": message.message,
@@ -973,4 +999,5 @@ async def update_user_role(email: str, role_data: UpdateRole, current_user: dict
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    port = int(os.getenv("PORT", "5000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

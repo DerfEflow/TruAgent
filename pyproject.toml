@@ -8,6 +8,7 @@ dependencies = [
     "openai>=2.3.0",
     "pydantic>=2.12.2",
     "pyjwt>=2.10.1",
+    "python-dotenv>=1.0.1",
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.20",
     "requests>=2.32.5",

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.venv/**)",
+      "Read(venv/**)",
+      "Read(**/__pycache__/**)",
+      "Read(**/*.pyc)",
+      "Read(.env)",
+      "Read(db.json)",
+      "Read(documents/**)"
+    ]
+  }
+}
