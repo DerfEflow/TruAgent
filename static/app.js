@@ -109,13 +109,11 @@ function logout() {
   showLogin();
 }
 
-function showTab(tabName) {
+function showTab(tabName, btn) {
   document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-  
-  event.target.classList.add('active');
+  if (btn) btn.classList.add('active');
   document.getElementById(`${tabName}-tab`).classList.add('active');
-  
   if (tabName === 'jobs') refreshJobs();
   if (tabName === 'documents') refreshDocuments();
   if (tabName === 'financials') refreshFinancials();
@@ -233,7 +231,7 @@ async function refreshJobs() {
       const jobs = Object.values(data.jobs);
       
       if (jobs.length === 0) {
-        jobsList.innerHTML = '<p style="color: var(--truline-gray);">No jobs found. Jobs will appear here when synced from Roofr via Zapier.</p>';
+        jobsList.innerHTML = '<div class="empty-state"><div class="empty-icon">&#9634;</div><p>No jobs synced yet</p><span>Jobs appear here once Roofr is connected</span></div>';
       } else {
         jobs.forEach(job => {
           const status = job.status || 'Unknown';
@@ -274,7 +272,7 @@ async function refreshDocuments() {
       const documents = Object.values(data.documents);
       
       if (documents.length === 0) {
-        documentsList.innerHTML = '<p style="color: var(--truline-gray);">No documents uploaded yet.</p>';
+        documentsList.innerHTML = '<div class="empty-state"><div class="empty-icon">&#9634;</div><p>No documents uploaded</p><span>Upload estimates, specs, contracts, or any job files</span></div>';
       } else {
         documents.forEach(doc => {
           const docCard = document.createElement('div');

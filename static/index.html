@@ -12,10 +12,10 @@
   <div id="login-screen" class="screen">
     <div class="login-container">
       <img src="/static/logo.png" alt="Truline Roofing" class="logo">
-      <h1>Truline Roofing</h1>
-      <h2>AI Agent Portal</h2>
+      <h1>TRULINE ROOFING</h1>
+      <h2>AI Operations Portal</h2>
       <form class="login-form" onsubmit="event.preventDefault(); login();">
-        <input type="email" id="email" placeholder="Email Address" autocomplete="email" required>
+        <input type="email" id="email" placeholder="Email" autocomplete="email" required>
         <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
         <button type="submit" class="btn-primary">Sign In</button>
         <div id="login-error" class="error-message"></div>
@@ -39,106 +39,125 @@
     </header>
 
     <nav class="tabs">
-      <button class="tab active" onclick="showTab('ai-agent')">AI Agent</button>
-      <button class="tab" onclick="showTab('jobs')">Jobs</button>
-      <button class="tab" onclick="showTab('documents')">Documents</button>
-      <button class="tab manager-only hidden" onclick="showTab('financials')">Financials</button>
-      <button class="tab admin-only hidden" onclick="showTab('admin')">Admin</button>
+      <button class="tab active" onclick="showTab('ai-agent', this)">AI Agent</button>
+      <button class="tab" onclick="showTab('jobs', this)">Jobs</button>
+      <button class="tab" onclick="showTab('documents', this)">Documents</button>
+      <button class="tab manager-only hidden" onclick="showTab('financials', this)">Financials</button>
+      <button class="tab admin-only hidden" onclick="showTab('admin', this)">Admin</button>
     </nav>
 
     <main class="main-content">
+
+      <!-- AI AGENT TAB -->
       <div id="ai-agent-tab" class="tab-content active">
         <div class="chat-container">
           <div class="chat-header">
-            <h2>AI Assistant</h2>
-            <p>Jobs · Documents · Operations</p>
+            <h2>AI ASSISTANT</h2>
+            <p>Jobs &middot; Documents &middot; Operations</p>
           </div>
           <div id="chat-messages" class="chat-messages"></div>
           <div class="chat-input-container">
-            <input type="text" id="chat-input" placeholder="Ask the AI agent..." onkeypress="handleChatKeypress(event)">
+            <input type="text" id="chat-input" placeholder="Ask anything about jobs, documents, or operations..." onkeypress="handleChatKeypress(event)">
             <button onclick="sendChatMessage()" class="btn-primary">Send</button>
           </div>
         </div>
       </div>
 
+      <!-- JOBS TAB -->
       <div id="jobs-tab" class="tab-content">
         <div class="section-header">
-          <h2>Roofr CRM Jobs</h2>
+          <h2>Jobs</h2>
           <button onclick="refreshJobs()" class="btn-secondary">Refresh</button>
         </div>
-        <div id="jobs-list" class="jobs-list"></div>
+        <div id="jobs-list" class="jobs-list">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>No jobs synced yet</p>
+            <span>Jobs appear here once Roofr is connected</span>
+          </div>
+        </div>
       </div>
 
+      <!-- DOCUMENTS TAB -->
       <div id="documents-tab" class="tab-content">
         <div class="section-header">
-          <h2>Company Documents</h2>
-          <button onclick="document.getElementById('file-upload').click()" class="btn-primary">Upload Document</button>
+          <h2>Documents</h2>
+          <button onclick="document.getElementById('file-upload').click()" class="btn-primary">Upload</button>
           <input type="file" id="file-upload" style="display: none" onchange="uploadDocument()">
         </div>
-        <div id="documents-list" class="documents-list"></div>
+        <div id="documents-list" class="documents-list">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>No documents uploaded</p>
+            <span>Upload estimates, specs, contracts, or any job files</span>
+          </div>
+        </div>
       </div>
 
+      <!-- FINANCIALS TAB -->
       <div id="financials-tab" class="tab-content manager-only">
         <div class="section-header">
-          <h2>Job Profitability Reports</h2>
+          <h2>Financials</h2>
           <button onclick="refreshFinancials()" class="btn-secondary">Refresh</button>
         </div>
         <div class="financials-controls">
-          <label for="job-select">Select Job:</label>
+          <label for="job-select">Job</label>
           <select id="job-select" onchange="loadJobFinancials()">
-            <option value="">-- Select a job --</option>
+            <option value="">Select a job&hellip;</option>
           </select>
         </div>
         <div id="financials-content">
-          <p class="help-text">Select a job to view its financial profitability report.</p>
+          <div class="empty-state">
+            <div class="empty-icon">&#9636;</div>
+            <p>Select a job to view profitability</p>
+            <span>Revenue, costs, and margin will appear here</span>
+          </div>
         </div>
       </div>
 
+      <!-- ADMIN TAB -->
       <div id="admin-tab" class="tab-content admin-only">
-        <div class="section-header">
-          <h2>Admin Controls</h2>
-        </div>
         <div class="admin-section">
-          <h3>Zapier Webhook Configuration</h3>
+          <h3>Zapier Webhook</h3>
           <div class="webhook-info">
-            <strong>Webhook URL:</strong>
+            <strong>Webhook URL</strong>
             <code id="webhook-url"></code>
-            <button onclick="copyWebhookUrl()" class="btn-secondary">Copy URL</button>
+            <button onclick="copyWebhookUrl()" class="btn-secondary">Copy</button>
           </div>
           <div class="webhook-info">
-            <strong>Secret Key:</strong>
+            <strong>Secret Key</strong>
             <code id="webhook-secret"></code>
-            <button onclick="copyWebhookSecret()" class="btn-secondary">Copy Secret</button>
+            <button onclick="copyWebhookSecret()" class="btn-secondary">Copy</button>
           </div>
-          <p class="help-text">Configure your Zapier webhook to send Roofr data to this app. Include the secret key in the "secret" field of the webhook payload for security.</p>
+          <p class="help-text">Paste this URL into Zapier's "Catch Hook" trigger. Include the secret key in the payload's <code class="inline-code">"secret"</code> field.</p>
         </div>
         <div class="admin-section">
-          <h3>User Management</h3>
-          <p class="help-text">Manage user access and permissions</p>
-          
+          <h3>Users</h3>
           <div class="user-management">
-            <button onclick="showAddUserModal()" class="btn-primary">Add New User</button>
+            <button onclick="showAddUserModal()" class="btn-primary">Add User</button>
             <div id="users-list" class="users-list"></div>
           </div>
         </div>
       </div>
+
     </main>
   </div>
 
+  <!-- ADD USER MODAL -->
   <div id="add-user-modal" class="modal hidden">
     <div class="modal-content">
-      <h3>Add New User</h3>
+      <h3>Add User</h3>
       <form onsubmit="event.preventDefault(); createUser();">
-        <input type="email" id="new-user-email" placeholder="Email Address" required>
+        <input type="email" id="new-user-email" placeholder="Email address" required>
         <input type="password" id="new-user-password" placeholder="Password" required>
         <select id="new-user-role" required>
-          <option value="">Select Role</option>
+          <option value="">Select role&hellip;</option>
           <option value="super_admin">Super Admin</option>
           <option value="manager">Manager</option>
-          <option value="user">User</option>
+          <option value="user">Field Crew</option>
         </select>
         <div class="modal-actions">
-          <button type="submit" class="btn-primary">Create User</button>
+          <button type="submit" class="btn-primary">Create</button>
           <button type="button" onclick="closeAddUserModal()" class="btn-secondary">Cancel</button>
         </div>
       </form>

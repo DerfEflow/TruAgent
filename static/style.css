@@ -878,6 +878,8 @@ body {
 /* ═══════════════════════════ RESPONSIVE ══════════════════════ */
 @media (max-width: 768px) {
   .header-content { padding: 0 16px; }
+  #user-email { display: none; }
+  .user-info { gap: 10px; }
 
   .header h1 {
     font-size: 11px;
@@ -908,7 +910,7 @@ body {
     gap: 12px;
   }
 
-  .user-actions { width: 100%; }
+  .user-actions { width: 100%; justify-content: flex-end; }
 
   .financials-controls {
     flex-direction: column;
@@ -930,4 +932,111 @@ body {
     width: calc(100vw - 40px);
     padding: 40px 28px 36px;
   }
+
+  .admin-section { padding: 20px 16px; }
+}
+
+@media (max-width: 480px) {
+  .header-logo { width: 28px; margin-right: 10px; }
+
+  .header h1 {
+    font-size: 10px;
+    letter-spacing: 1.5px;
+  }
+
+  .tab {
+    padding: 12px 12px;
+    font-size: 9px;
+    letter-spacing: 1px;
+  }
+
+  .chat-container { height: calc(100vh - 190px); }
+
+  .chat-input-container { padding: 10px 12px; gap: 8px; }
+
+  .section-header { margin-bottom: 16px; }
+
+  .login-container { padding: 32px 20px 28px; }
+
+  .login-container .logo { width: 60px; }
+
+  .login-container h1 { font-size: 18px; letter-spacing: 5px; }
+
+  .webhook-info code { font-size: 10px; }
+
+  .modal-content { padding: 24px 18px; }
+}
+
+/* ═══════════════════════════ EMPTY STATES ════════════════════ */
+.empty-state {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 24px;
+  text-align: center;
+  gap: 10px;
+  border: 1px dashed var(--border);
+  background: var(--panel);
+}
+
+.empty-icon {
+  font-size: 32px;
+  color: var(--t3);
+  opacity: 0.4;
+  margin-bottom: 6px;
+}
+
+.empty-state p {
+  color: var(--t2);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin: 0;
+}
+
+.empty-state span {
+  color: var(--t3);
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+
+/* ═══════════════════════════ INLINE CODE ═════════════════════ */
+.inline-code {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--green-hi);
+  background: var(--bg-mid);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+}
+
+/* ═══════════════════════════ SELECT OVERRIDE ═════════════════ */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235e7a8c'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px !important;
+}
+
+/* ═══════════════════════════ LOGIN TITLE FIX ═════════════════ */
+/* h1 in login is already uppercase in HTML — prevent double-transform */
+.login-container h1 {
+  font-size: 20px;
+  letter-spacing: 6px;
+}
+
+/* ═══════════════════════════ ADMIN — NO SECTION-HEADER ══════ */
+#admin-tab .section-header {
+  display: none;
+}
+
+/* ═══════════════════════════ USER CARD ROLE BADGE ═══════════ */
+.user-info-card .role-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 9px;
 }
