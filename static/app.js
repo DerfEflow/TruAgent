@@ -298,6 +298,14 @@ async function loadWebhookInfo() {
   }
 }
 
+function formatMoney(val) {
+  const num = typeof val === 'number'
+    ? val
+    : parseFloat(String(val).replace(/[^0-9.\-]/g, ''));
+  if (isNaN(num)) return String(val);
+  return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
 async function refreshJobs() {
   try {
     const response = await fetch('/jobs', {
@@ -321,12 +329,46 @@ async function refreshJobs() {
             .map(n => (typeof n === 'string' ? n : (n && n.note) ? n.note : ''))
             .filter(Boolean)
             .join('; ');
+
+          // Job name is the headline; fall back to customer name, then the id.
+          const title = job.job_name || job.client_name || `Job ${job.job_id || ''}`.trim();
+
+          // Prominent dollar value line, shown only when a value was sent.
+          const valueHtml = (job.job_value !== undefined && job.job_value !== null && job.job_value !== '')
+            ? `<div class="job-value">${formatMoney(job.job_value)}</div>` : '';
+
+          // Known detail rows, each rendered only when present.
+          const rows = [];
+          if (job.job_name && job.client_name) rows.push(['Customer', job.client_name]);
+          if (job.customer_phone) rows.push(['Phone', job.customer_phone]);
+          if (job.customer_email) rows.push(['Email', job.customer_email]);
+          if (job.assigned_to) rows.push(['Assigned', job.assigned_to]);
+          if (job.address) rows.push(['Address', job.address]);
+          if (job.job_id) rows.push(['Job ID', job.job_id]);
+
+          // Catch-all: surface any other field Roofr sends that we don't already
+          // show, so mapping a new field in Zapier just works with no code change.
+          const HIDE = new Set(['job_id', 'job_name', 'client_name', 'job_value',
+            'status', 'address', 'customer_phone', 'customer_email', 'assigned_to',
+            'notes', 'images', 'invoices', 'expenses', 'workflow_stage']);
+          Object.keys(job).forEach(k => {
+            if (HIDE.has(k)) return;
+            const v = job[k];
+            if (v === null || v === undefined || v === '' || typeof v === 'object') return;
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            rows.push([label, v]);
+          });
+
+          const rowsHtml = rows
+            .map(([label, val]) => `<p><strong>${label}:</strong> ${val}</p>`)
+            .join('');
+
           const jobCard = document.createElement('div');
           jobCard.className = 'job-card';
           jobCard.innerHTML = `
-            <h3>${job.client_name || 'N/A'}</h3>
-            <p><strong>Job ID:</strong> ${job.job_id || 'N/A'}</p>
-            <p><strong>Address:</strong> ${job.address || 'N/A'}</p>
+            <h3>${title}</h3>
+            ${valueHtml}
+            ${rowsHtml}
             <p><strong>Status:</strong> <span class="status-badge status-${statusClass}">${status}</span></p>
             ${notesText ? `<p><strong>Notes:</strong> ${notesText}</p>` : ''}
           `;

@@ -520,6 +520,21 @@ body {
   margin-bottom: 14px;
 }
 
+/* Job name is the headline of the card — larger and tighter to the value. */
+.job-card h3 {
+  font-size: 20px;
+  line-height: 1.2;
+  margin-bottom: 6px;
+}
+
+.job-value {
+  color: var(--green-hi);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  margin-bottom: 14px;
+}
+
 .job-card p, .document-card p {
   color: var(--t2);
   font-size: 13px;

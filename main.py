@@ -310,29 +310,29 @@ async def zapier_webhook(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Webhook body must be a JSON object")
 
-    try:
-        webhook = ZapierWebhook(**payload)
-    except Exception:
-        raise HTTPException(status_code=422, detail="Webhook payload missing required fields (need at least 'secret')")
-
-    if webhook.secret != ZAPIER_SECRET:
+    if payload.get("secret") != ZAPIER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
+    # Accept whatever fields Roofr/Zapier sends so new fields (job value, customer
+    # phone/email, assignee, etc.) can be mapped in Zapier without a code change.
+    # Drop the secret, ignore blanks, and flatten a nested "data" object if present.
+    fields = {k: v for k, v in payload.items()
+              if k not in ("secret", "data") and v not in (None, "")}
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        fields.update({k: v for k, v in nested.items() if v not in (None, "")})
+
+    job_id = fields.get("job_id")
+    if not job_id:
+        # No id to key the job on (e.g. an empty test record). Accept the request
+        # so Zapier reports success, but store nothing.
+        return {"status": "ok", "message": "Webhook received (no job_id, nothing stored)"}
+
     db = load_db()
-    
-    if webhook.job_id:
-        if webhook.job_id in db["jobs"]:
-            for key, value in webhook.dict().items():
-                if value is not None and key not in ["secret", "data"]:
-                    db["jobs"][webhook.job_id][key] = value
-            if webhook.data:
-                db["jobs"][webhook.job_id].update(webhook.data)
-        else:
-            job_data = {k: v for k, v in webhook.dict().items() if k != "secret" and v is not None}
-            if webhook.data:
-                job_data.update(webhook.data)
-            db["jobs"][webhook.job_id] = job_data
-    
+    if job_id in db["jobs"]:
+        db["jobs"][job_id].update(fields)
+    else:
+        db["jobs"][job_id] = fields
     save_db(db)
     return {"status": "ok", "message": "Webhook received"}
 
