@@ -902,7 +902,7 @@ Role: {"Super Admin (Full Access)" if user_role == "super_admin" else "Manager (
             model="gpt-5.5",
             messages=messages,  # type: ignore
             temperature=0.7,
-            max_tokens=1000
+            max_completion_tokens=1000
         )
         
         assistant_message = response.choices[0].message.content
