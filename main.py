@@ -280,6 +280,11 @@ async def get_all_jobs(current_user: dict = Depends(get_current_user)):
     db = load_db()
     return {"jobs": db["jobs"]}
 
+@app.get("/zapier/webhook")
+async def zapier_webhook_verify():
+    """Zapier GET verification check"""
+    return {"status": "ok", "message": "TruAgent webhook ready"}
+
 @app.post("/zapier/webhook")
 async def zapier_webhook(webhook: ZapierWebhook):
     if webhook.secret != ZAPIER_SECRET:
