@@ -899,7 +899,7 @@ Role: {"Super Admin (Full Access)" if user_role == "super_admin" else "Manager (
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.5",
             messages=messages,  # type: ignore
             temperature=0.7,
             max_tokens=1000
@@ -919,6 +919,26 @@ Role: {"Super Admin (Full Access)" if user_role == "super_admin" else "Manager (
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
+
+@app.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """Transcribe voice recording using OpenAI Whisper"""
+    client = get_openai_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="OpenAI not configured")
+    try:
+        from io import BytesIO
+        audio_bytes = await audio.read()
+        audio_file = BytesIO(audio_bytes)
+        audio_file.name = audio.filename or "recording.webm"
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="en"
+        )
+        return {"text": transcript.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 @app.get("/chat/history")
 async def get_chat_history(current_user: dict = Depends(get_current_user)):

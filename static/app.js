@@ -200,6 +200,87 @@ function handleChatKeypress(event) {
   }
 }
 
+// ─── VOICE INPUT ────────────────────────────────────────────────
+let _mediaRecorder = null;
+let _audioChunks = [];
+let _isRecording = false;
+
+function toggleRecording() {
+  if (_isRecording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+    _mediaRecorder = new MediaRecorder(stream, { mimeType });
+    _audioChunks = [];
+
+    _mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) _audioChunks.push(e.data);
+    };
+
+    _mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(_audioChunks, { type: mimeType });
+      await transcribeAudio(blob, mimeType);
+    };
+
+    _mediaRecorder.start();
+    _isRecording = true;
+    const btn = document.getElementById('mic-btn');
+    btn.classList.add('recording');
+    btn.title = 'Tap to stop';
+  } catch (err) {
+    alert('Microphone access denied. Please allow microphone permission and try again.');
+  }
+}
+
+function stopRecording() {
+  if (_mediaRecorder && _isRecording) {
+    _mediaRecorder.stop();
+    _isRecording = false;
+    const btn = document.getElementById('mic-btn');
+    btn.classList.remove('recording');
+    btn.title = 'Voice input';
+  }
+}
+
+async function transcribeAudio(blob, mimeType) {
+  const btn = document.getElementById('mic-btn');
+  btn.disabled = true;
+  btn.title = 'Transcribing…';
+  try {
+    const ext = mimeType.includes('webm') ? 'webm' : 'mp4';
+    const formData = new FormData();
+    formData.append('audio', blob, `recording.${ext}`);
+
+    const res = await fetch('/transcribe', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: formData
+    });
+
+    if (!res.ok) throw new Error('Transcription failed');
+    const data = await res.json();
+    if (data.text) {
+      const input = document.getElementById('chat-input');
+      input.value = data.text;
+      input.focus();
+    }
+  } catch (err) {
+    alert('Could not transcribe audio. Please try again.');
+  } finally {
+    btn.disabled = false;
+    btn.title = 'Voice input';
+  }
+}
+// ────────────────────────────────────────────────────────────────
+
 async function loadWebhookInfo() {
   try {
     const response = await fetch('/admin/webhook-info', {

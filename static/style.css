@@ -461,6 +461,37 @@ body {
   clip-path: none;
 }
 
+.btn-mic {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--t2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.btn-mic:hover {
+  border-color: var(--green);
+  color: var(--green-hi);
+  background: var(--green-glow);
+}
+
+.btn-mic.recording {
+  background: rgba(229, 57, 53, 0.12);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.btn-mic:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ═══════════════════════════ CARDS ════════════════════════════ */
 .jobs-list, .documents-list {
   display: grid;
