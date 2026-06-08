@@ -286,10 +286,38 @@ async def zapier_webhook_verify():
     return {"status": "ok", "message": "TruAgent webhook ready"}
 
 @app.post("/zapier/webhook")
-async def zapier_webhook(webhook: ZapierWebhook):
+async def zapier_webhook(request: Request):
+    # Zapier/Roofr can deliver the payload in several shapes depending on how the
+    # Zap is configured: a plain JSON object (ideal), a JSON array wrapping one
+    # object ("Wrap Request In Array"), a double-encoded JSON string, or
+    # form-encoded fields. Normalize all of them to one dict so the webhook never
+    # hard-fails on benign wrapping.
+    try:
+        payload = await request.json()
+    except Exception:
+        try:
+            payload = dict(await request.form())
+        except Exception:
+            payload = {}
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if isinstance(payload, list):
+        payload = next((p for p in payload if isinstance(p, dict)), {})
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Webhook body must be a JSON object")
+
+    try:
+        webhook = ZapierWebhook(**payload)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Webhook payload missing required fields (need at least 'secret')")
+
     if webhook.secret != ZAPIER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
-    
+
     db = load_db()
     
     if webhook.job_id:
