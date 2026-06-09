@@ -1,5 +1,7 @@
 # Truline Roofing AI Agent - Complete Integration Guide
 
+> **Hosting note:** This app now runs on **Railway** (not Replit). Wherever this guide says "Replit Secrets," set the value in **Railway → your service → Variables** instead. The live base URL is `https://truagent-production.up.railway.app`. For the current, confirmed Roofr field mappings see `docs/handoff.md`.
+
 ## Overview
 
 This guide covers all Zapier integrations for the Truline Roofing AI Agent platform. The system supports bi-directional data flows with Roofr CRM, QuickBooks financial data, email automation, and SMS notifications.
@@ -29,12 +31,12 @@ The Roofr integration works in BOTH directions:
 
 **Webhook Endpoint**:
 ```
-https://workspace-fredwolfe.replit.app/zapier/webhook
+https://truagent-production.up.railway.app/zapier/webhook
 ```
 
 **Secret Key**:
 ```
-jSlhh7mtn2jmq2EvNgZ7-FIUJX-4loCRW-KlNArx1xE
+<YOUR_ZAPIER_SECRET>
 ```
 
 See ZAPIER_QUICKSTART.md for detailed setup instructions.
@@ -95,7 +97,7 @@ See ZAPIER_QUICKSTART.md for detailed setup instructions.
 
 **Webhook Endpoint**:
 ```
-https://workspace-fredwolfe.replit.app/quickbooks/webhook
+https://truagent-production.up.railway.app/quickbooks/webhook
 ```
 
 **Secret Key** (Configure in Replit Secrets):
@@ -114,7 +116,7 @@ https://workspace-fredwolfe.replit.app/quickbooks/webhook
 1. Add **Action**: Webhooks by Zapier → POST
 2. Configure:
    ```
-   URL: https://workspace-fredwolfe.replit.app/quickbooks/webhook
+   URL: https://truagent-production.up.railway.app/quickbooks/webhook
    Payload Type: JSON
    Data:
      secret: [Your QUICKBOOKS_SECRET]
@@ -145,7 +147,7 @@ https://workspace-fredwolfe.replit.app/quickbooks/webhook
 1. Add **Action**: Webhooks by Zapier → POST
 2. Configure:
    ```
-   URL: https://workspace-fredwolfe.replit.app/quickbooks/webhook
+   URL: https://truagent-production.up.railway.app/quickbooks/webhook
    Payload Type: JSON
    Data:
      secret: [Your QUICKBOOKS_SECRET]
@@ -199,7 +201,7 @@ Once configured, managers and admins can:
 
 **Webhook Endpoint**:
 ```
-https://workspace-fredwolfe.replit.app/send-email
+https://truagent-production.up.railway.app/send-email
 ```
 
 ### 3.1 Gmail Email Setup
@@ -270,7 +272,7 @@ The system will:
 
 **Webhook Endpoint**:
 ```
-https://workspace-fredwolfe.replit.app/send-sms
+https://truagent-production.up.railway.app/send-sms
 ```
 
 ### 4.1 Twilio SMS Setup
@@ -318,7 +320,7 @@ Configure these in Replit Secrets (lock icon in sidebar):
 
 | Variable | Purpose | Example Value |
 |----------|---------|---------------|
-| `ZAPIER_SECRET` | Authenticate incoming Roofr webhooks | `jSlhh7mtn2jmq2EvNgZ7...` |
+| `ZAPIER_SECRET` | Authenticate incoming Roofr webhooks | `<YOUR_ZAPIER_SECRET>` |
 | `ROOFR_WEBHOOK_URL` | Send job updates back to Roofr | `https://hooks.zapier.com/hooks/catch/...` |
 | `QUICKBOOKS_SECRET` | Authenticate incoming QB webhooks | `create_strong_secret_123` |
 | `EMAIL_WEBHOOK_URL` | Trigger email sending via Zapier | `https://hooks.zapier.com/hooks/catch/...` |

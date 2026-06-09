@@ -363,6 +363,28 @@ async function refreshJobs() {
             .map(([label, val]) => `<p><strong>${label}:</strong> ${val}</p>`)
             .join('');
 
+          // Update controls: change pipeline stage / add a note. POSTs to
+          // /roofr/update, which saves locally and syncs to Roofr best-effort.
+          // Operational (non-financial), so available to all roles — matches
+          // what the AI agent already lets any user do.
+          const jid = job.job_id;
+          const STAGES = ['Lead', 'Quote', 'Approved', 'In Progress', 'Complete'];
+          const currentStage = job.workflow_stage || '';
+          const stageOptions = ['<option value="">Update stage…</option>']
+            .concat(STAGES.map(s =>
+              `<option value="${s}"${s === currentStage ? ' selected' : ''}>${s}</option>`))
+            .join('');
+          const actionsHtml = jid ? `
+            <div class="job-actions">
+              <select class="job-stage-select" onchange="updateJobStage('${jid}', this.value)">${stageOptions}</select>
+              <div class="job-note-row">
+                <input type="text" class="job-note-input" id="note-${jid}" placeholder="Add a note…"
+                       onkeydown="if(event.key==='Enter'){addJobNote('${jid}')}">
+                <button class="btn-secondary btn-small" onclick="addJobNote('${jid}')">Save Note</button>
+              </div>
+              <div class="sync-status" id="sync-${jid}"></div>
+            </div>` : '';
+
           const jobCard = document.createElement('div');
           jobCard.className = 'job-card';
           jobCard.innerHTML = `
@@ -371,6 +393,7 @@ async function refreshJobs() {
             ${rowsHtml}
             <p><strong>Status:</strong> <span class="status-badge status-${statusClass}">${status}</span></p>
             ${notesText ? `<p><strong>Notes:</strong> ${notesText}</p>` : ''}
+            ${actionsHtml}
           `;
           jobsList.appendChild(jobCard);
         });
@@ -380,6 +403,49 @@ async function refreshJobs() {
     console.error('Failed to load jobs:', error);
   }
 }
+
+// ─── JOB UPDATE CONTROLS ───────────────────────────────────────
+async function postJobUpdate(jobId, payload) {
+  const syncEl = document.getElementById(`sync-${jobId}`);
+  if (syncEl) { syncEl.textContent = 'Saving…'; syncEl.className = 'sync-status pending'; }
+  try {
+    const res = await fetch('/roofr/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(Object.assign({ job_id: jobId }, payload))
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const sync = data.roofr_sync || 'saved';
+      const msg = sync === 'synced' ? '✓ Saved & synced to Roofr'
+        : sync === 'not configured' ? '✓ Saved (Roofr sync not set up yet)'
+        : `✓ Saved locally — Roofr ${sync}`;
+      if (syncEl) { syncEl.textContent = msg; syncEl.className = 'sync-status ok'; }
+      // Show the confirmation briefly, then re-render so the badge/notes update.
+      setTimeout(refreshJobs, 1500);
+    } else if (syncEl) {
+      syncEl.textContent = (data && data.detail) ? data.detail : 'Update failed';
+      syncEl.className = 'sync-status err';
+    }
+  } catch (e) {
+    if (syncEl) { syncEl.textContent = 'Update failed'; syncEl.className = 'sync-status err'; }
+  }
+}
+
+function updateJobStage(jobId, stage) {
+  if (!stage) return;
+  // For a coating job the pipeline stage is effectively the status, so set both.
+  postJobUpdate(jobId, { workflow_stage: stage, status: stage });
+}
+
+async function addJobNote(jobId) {
+  const input = document.getElementById(`note-${jobId}`);
+  const note = input ? input.value.trim() : '';
+  if (!note) return;
+  if (input) input.value = '';
+  await postJobUpdate(jobId, { notes: note });
+}
+// ────────────────────────────────────────────────────────────────
 
 async function refreshDocuments() {
   try {

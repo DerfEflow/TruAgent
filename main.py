@@ -55,9 +55,22 @@ QUICKBOOKS_SECRET = os.getenv("QUICKBOOKS_SECRET", "change_this_in_production")
 EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")
 SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
 
+# AI model is configurable so a bad/unavailable id never requires a code change.
+# Default is the id confirmed working on this account; a known-good fallback is
+# used automatically if the primary id is rejected (see _create_completion).
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
+OPENAI_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini")
+
 ADMIN_EMAIL = "fred@trulineroofing.com"
 
-db_file = "db.json"
+# Persistent storage location. Defaults to the project dir (current behaviour) so
+# local dev is unchanged. In production set DATA_DIR to a mounted persistent
+# volume (e.g. DATA_DIR=/data on Railway) so db.json + uploaded documents survive
+# every redeploy. Both the database file and the documents folder live here.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+db_file = os.path.join(DATA_DIR, "db.json")
+DOCUMENTS_DIR = os.path.join(DATA_DIR, "documents")
 
 def load_db():
     if os.path.exists(db_file):
@@ -112,8 +125,13 @@ def load_db():
     }
 
 def save_db(data):
-    with open(db_file, 'w') as f:
+    # Atomic write: dump to a temp file in the same directory, then os.replace()
+    # it over the target. A crash mid-write can't leave db.json half-written and
+    # invalid (which would fail to load on the next boot).
+    tmp = db_file + ".tmp"
+    with open(tmp, 'w') as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, db_file)
 
 security = HTTPBearer()
 
@@ -231,6 +249,378 @@ class SMSMessage(BaseModel):
     to: str
     message: str
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent operations — shared by the /chat AI agent (tool-calling) and the explicit
+# /ai/action endpoint, so both go through one code path and stay consistent.
+# These are plain functions (no FastAPI deps); they mutate and persist `db`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sync_to_roofr(payload: dict) -> str:
+    """POST a job update out to Roofr via the Zapier outbound webhook, if set.
+    Returns a short status string: 'synced', 'not configured', or an error."""
+    if not ROOFR_WEBHOOK_URL:
+        return "not configured"
+    try:
+        import requests
+        resp = requests.post(ROOFR_WEBHOOK_URL, json=payload, timeout=10)
+        resp.raise_for_status()
+        return "synced"
+    except Exception as e:
+        return f"sync failed: {e}"
+
+
+def _op_update_job_status(db: dict, job_id: Optional[str], status: Optional[str],
+                          workflow_stage: Optional[str], user_email: str) -> dict:
+    job = db["jobs"].get(job_id) if job_id else None
+    if not job:
+        return {"status": "error", "message": f"Job {job_id!r} not found"}
+    if status:
+        job["status"] = status
+    if workflow_stage:
+        job["workflow_stage"] = workflow_stage
+    save_db(db)
+    sync = _sync_to_roofr({
+        "job_id": job_id,
+        "status": job.get("status"),
+        "workflow_stage": job.get("workflow_stage"),
+        "client_name": job.get("client_name"),
+        "address": job.get("address"),
+        "updated_by": user_email,
+        "updated_at": datetime.now().isoformat(),
+    })
+    return {"status": "ok", "job_id": job_id, "new_status": job.get("status"),
+            "workflow_stage": job.get("workflow_stage"), "roofr_sync": sync}
+
+
+def _op_add_job_note(db: dict, job_id: Optional[str], note: Optional[str],
+                     user_email: str) -> dict:
+    job = db["jobs"].get(job_id) if job_id else None
+    if not job:
+        return {"status": "error", "message": f"Job {job_id!r} not found"}
+    if not note:
+        return {"status": "error", "message": "Note text is required"}
+    notes = job.get("notes")
+    if not isinstance(notes, list):
+        notes = []
+    notes.append({"note": note, "added_by": user_email,
+                  "added_at": datetime.now().isoformat()})
+    job["notes"] = notes
+    save_db(db)
+    sync = _sync_to_roofr({
+        "job_id": job_id,
+        "new_note": note,
+        "client_name": job.get("client_name"),
+        "address": job.get("address"),
+        "updated_by": user_email,
+        "updated_at": datetime.now().isoformat(),
+    })
+    return {"status": "ok", "job_id": job_id, "roofr_sync": sync}
+
+
+def _gather_attachments(db: dict, document_ids) -> list:
+    attachments = []
+    for doc_id in (document_ids or []):
+        doc = db["documents"].get(str(doc_id))
+        if not doc:
+            continue
+        try:
+            import base64
+            with open(doc["filepath"], "rb") as f:
+                attachments.append({
+                    "filename": doc["filename"],
+                    "content": base64.b64encode(f.read()).decode(),
+                    "contentType": "application/octet-stream",
+                })
+        except Exception:
+            pass
+    return attachments
+
+
+def _op_send_email(db: dict, to: Optional[str], subject: str, body: str,
+                   html: Optional[str], document_ids, user_email: str) -> dict:
+    if not EMAIL_WEBHOOK_URL:
+        return {"status": "error", "message": "Email service not configured"}
+    if not to:
+        return {"status": "error", "message": "A recipient ('to') is required"}
+    attachments = _gather_attachments(db, document_ids)
+    payload = {
+        "to": to, "subject": subject, "body": body, "html": html,
+        "attachments": attachments or None,
+        "sent_by": user_email, "sent_at": datetime.now().isoformat(),
+    }
+    try:
+        import requests
+        resp = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
+        resp.raise_for_status()
+        return {"status": "ok", "message": f"Email sent to {to}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to send email: {e}"}
+
+
+def _op_send_sms(to: Optional[str], message: str, user_email: str) -> dict:
+    if not SMS_WEBHOOK_URL:
+        return {"status": "error", "message": "SMS service not configured"}
+    if not to:
+        return {"status": "error", "message": "A recipient ('to') is required"}
+    payload = {"to": to, "message": message, "sent_by": user_email,
+               "sent_at": datetime.now().isoformat()}
+    try:
+        import requests
+        resp = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
+        resp.raise_for_status()
+        return {"status": "ok", "message": f"SMS sent to {to}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to send SMS: {e}"}
+
+
+def _job_financials(db: dict, job_id: Optional[str]) -> dict:
+    job = db["jobs"].get(job_id) if job_id else None
+    if not job:
+        return {"status": "error", "message": f"Job {job_id!r} not found"}
+    financials = db.get("financials") or {}
+    inv_map = financials.get("invoices", {})
+    exp_map = financials.get("expenses", {})
+    invoices = [inv_map[i] for i in job.get("invoices", []) if i in inv_map]
+    expenses = [exp_map[e] for e in job.get("expenses", []) if e in exp_map]
+    revenue = sum(float(inv.get("amount", 0) or 0) for inv in invoices
+                  if inv.get("status") != "cancelled")
+    costs = sum(float(exp.get("amount", 0) or 0) for exp in expenses)
+    profit = revenue - costs
+    margin = (profit / revenue * 100) if revenue > 0 else 0
+    return {"status": "ok", "job_id": job_id, "client_name": job.get("client_name"),
+            "invoice_count": len(invoices), "expense_count": len(expenses),
+            "total_revenue": round(revenue, 2), "total_costs": round(costs, 2),
+            "profit": round(profit, 2), "margin_percent": round(margin, 2)}
+
+
+def _company_financials_summary(db: dict) -> dict:
+    financials = db.get("financials") or {}
+    inv = list((financials.get("invoices") or {}).values())
+    exp = list((financials.get("expenses") or {}).values())
+    revenue = sum(float(i.get("amount", 0) or 0) for i in inv
+                  if i.get("status") != "cancelled")
+    costs = sum(float(e.get("amount", 0) or 0) for e in exp)
+    profit = revenue - costs
+    margin = (profit / revenue * 100) if revenue > 0 else 0
+    return {"status": "ok", "job_count": len(db.get("jobs", {})),
+            "invoice_count": len(inv), "expense_count": len(exp),
+            "total_revenue": round(revenue, 2), "total_costs": round(costs, 2),
+            "profit": round(profit, 2), "margin_percent": round(margin, 2)}
+
+
+def _compact_job(job: dict) -> dict:
+    """A small, prompt-friendly view of a job (no financial id lists, no blobs)."""
+    return {k: job.get(k) for k in (
+        "job_id", "job_name", "client_name", "status", "workflow_stage",
+        "address", "assigned_to") if job.get(k) not in (None, "")}
+
+
+# OpenAI tool/function specs. Financial tools are exposed only to manager+.
+_TOOL_DEFS = {
+    "list_jobs": {"type": "function", "function": {
+        "name": "list_jobs",
+        "description": "List all jobs and leads with id, name, customer, status and workflow stage. Use to answer 'what jobs do we have' or to find a job_id.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "get_job": {"type": "function", "function": {
+        "name": "get_job",
+        "description": "Get the full detail of one job (all fields and notes) by its job_id.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string", "description": "The job's id"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "update_job_status": {"type": "function", "function": {
+        "name": "update_job_status",
+        "description": "Update a job's status and/or workflow stage. This automatically syncs the change back to the Roofr CRM when configured.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"},
+            "status": {"type": "string", "description": "New status, e.g. Pending, In Progress, Complete"},
+            "workflow_stage": {"type": "string", "description": "Optional pipeline stage: Lead, Quote, Approved, In Progress, Complete"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "add_job_note": {"type": "function", "function": {
+        "name": "add_job_note",
+        "description": "Add a note to a job. Automatically syncs to Roofr when configured.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"},
+            "note": {"type": "string"}},
+            "required": ["job_id", "note"], "additionalProperties": False}}},
+    "list_documents": {"type": "function", "function": {
+        "name": "list_documents",
+        "description": "List documents on file (id, filename, description).",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "send_email": {"type": "function", "function": {
+        "name": "send_email",
+        "description": "Send an email (via the configured email integration), optionally attaching documents by id.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string"},
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+            "document_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional document ids to attach"}},
+            "required": ["to", "subject", "body"], "additionalProperties": False}}},
+    "send_sms": {"type": "function", "function": {
+        "name": "send_sms",
+        "description": "Send a text message (via the configured SMS integration). Phone in E.164 format, e.g. +15551234567.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string"},
+            "message": {"type": "string"}},
+            "required": ["to", "message"], "additionalProperties": False}}},
+    "get_job_financials": {"type": "function", "function": {
+        "name": "get_job_financials",
+        "description": "Get revenue, costs, profit and margin for one job (manager/admin only).",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "company_financials_summary": {"type": "function", "function": {
+        "name": "company_financials_summary",
+        "description": "Get company-wide totals: revenue, costs, profit and margin across all jobs (manager/admin only).",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+}
+
+_COMMON_TOOLS = ["list_jobs", "get_job", "update_job_status", "add_job_note",
+                 "list_documents", "send_email", "send_sms"]
+_FINANCIAL_TOOLS = ["get_job_financials", "company_financials_summary"]
+
+
+def tools_for_role(role: str) -> list:
+    names = list(_COMMON_TOOLS)
+    if role in ("manager", "super_admin"):
+        names += _FINANCIAL_TOOLS
+    return [_TOOL_DEFS[n] for n in names]
+
+
+def execute_agent_tool(name: str, args: dict, current_user: dict, db: dict) -> dict:
+    """Dispatch one tool call. Enforces role gating server-side (never trust the
+    model alone): field crew can never reach financial data."""
+    role = current_user.get("role", "user")
+    email = current_user["email"]
+    args = args or {}
+
+    if name in _FINANCIAL_TOOLS and role not in ("manager", "super_admin"):
+        return {"status": "error", "message": "Financial data is restricted to managers and admins."}
+
+    if name == "list_jobs":
+        return {"status": "ok", "jobs": [_compact_job(j) for j in db["jobs"].values()]}
+    if name == "get_job":
+        job = db["jobs"].get(args.get("job_id"))
+        if not job:
+            return {"status": "error", "message": "Job not found"}
+        if role == "user":  # hide financial id-lists from field crew
+            job = {k: v for k, v in job.items() if k not in ("invoices", "expenses")}
+        return {"status": "ok", "job": job}
+    if name == "update_job_status":
+        return _op_update_job_status(db, args.get("job_id"), args.get("status"),
+                                     args.get("workflow_stage"), email)
+    if name == "add_job_note":
+        return _op_add_job_note(db, args.get("job_id"), args.get("note"), email)
+    if name == "list_documents":
+        return {"status": "ok", "documents": [
+            {"id": d.get("id"), "filename": d.get("filename"), "description": d.get("description")}
+            for d in db["documents"].values()]}
+    if name == "send_email":
+        return _op_send_email(db, args.get("to"), args.get("subject", ""),
+                              args.get("body", ""), args.get("html"),
+                              args.get("document_ids"), email)
+    if name == "send_sms":
+        return _op_send_sms(args.get("to"), args.get("message", ""), email)
+    if name == "get_job_financials":
+        return _job_financials(db, args.get("job_id"))
+    if name == "company_financials_summary":
+        return _company_financials_summary(db)
+    return {"status": "error", "message": f"Unknown tool: {name}"}
+
+
+def _build_chat_system_prompt(db: dict, user_email: str, user_role: str) -> str:
+    """Lean, step-scoped system prompt: a compact job summary inline (not the
+    whole DB) plus tools for details and actions. Keeps token use bounded."""
+    jobs = list(db.get("jobs", {}).values())
+    compact = [_compact_job(j) for j in jobs[:40]]
+    job_summary = json.dumps(compact, indent=2) if compact else "(no jobs synced yet)"
+    more = (f"\n(Showing 40 of {len(jobs)} jobs — call list_jobs for the rest.)"
+            if len(jobs) > 40 else "")
+    doc_count = len(db.get("documents", {}))
+
+    base = f"""You are TruAgent, the AI operations assistant for Truline Roofing, a commercial roof coating contractor.
+Today's date: {datetime.now().strftime('%Y-%m-%d')}.
+
+You ANSWER questions and TAKE ACTIONS using the tools provided. Do not merely describe what you would do — call the matching tool, then confirm the outcome in plain language. Updating a job status or adding a note automatically syncs to the Roofr CRM when configured; report the sync result to the user.
+
+Current jobs (summary):
+{job_summary}{more}
+
+Documents on file: {doc_count} (call list_documents for details).
+
+Guidelines:
+- Be concise and practical; your users are busy office staff and field crews.
+- Call get_job for full detail (notes, all fields) before answering specifics about one job.
+- Confirm the job_id you are acting on. If it is ambiguous which job is meant, ask first.
+"""
+    if user_role == "user":
+        base += """
+ROLE: Field Crew / Sales (limited access). You MUST NOT reveal or discuss financial information (invoices, costs, profit, margins, expenses). You have no financial tools. If asked about money, reply: "Financial data is restricted — please ask a manager." Focus on job status, notes, scheduling, and customer communication.
+"""
+    else:
+        role_name = ("Super Admin (full access)" if user_role == "super_admin"
+                     else "Manager (full access incl. financials)")
+        base += f"""
+ROLE: {role_name}. You have financial tools (get_job_financials, company_financials_summary). Profit = revenue − costs; margin = profit / revenue × 100.
+"""
+    return base + f"\nCurrent user: {user_email}\n"
+
+
+def _create_completion(client, messages: list, tools: Optional[list] = None,
+                       max_completion_tokens: int = 2000):
+    """Call chat.completions with the configured model, falling back once to a
+    known-good model if the primary id is rejected (unknown/unavailable). This
+    keeps the AI from 500-ing on every message just because OPENAI_MODEL is bad."""
+    kwargs: Dict[str, Any] = {"messages": messages,
+                              "max_completion_tokens": max_completion_tokens}
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    try:
+        return client.chat.completions.create(model=OPENAI_MODEL, **kwargs)
+    except Exception as e:
+        msg = str(e).lower()
+        model_problem = any(s in msg for s in
+                            ("model", "404", "not found", "does not exist", "unsupported"))
+        if (OPENAI_FALLBACK_MODEL and OPENAI_FALLBACK_MODEL != OPENAI_MODEL
+                and model_problem):
+            return client.chat.completions.create(model=OPENAI_FALLBACK_MODEL, **kwargs)
+        raise
+
+
+def _run_agent_loop(client, messages: list, tools: list, current_user: dict,
+                    db: dict, max_hops: int = 5) -> str:
+    """Run the chat-completions tool-calling loop until the model returns a
+    final text answer or we hit the hop cap (then force a text answer)."""
+    for _ in range(max_hops):
+        resp = _create_completion(client, messages, tools=tools,
+                                  max_completion_tokens=2000)
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            return msg.content or ""
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [{"id": tc.id, "type": "function",
+                            "function": {"name": tc.function.name,
+                                         "arguments": tc.function.arguments}}
+                           for tc in tool_calls],
+        })
+        for tc in tool_calls:
+            try:
+                call_args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                call_args = {}
+            result = execute_agent_tool(tc.function.name, call_args, current_user, db)
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": json.dumps(result, default=str)})
+    # Hop cap reached — force a final natural-language answer with tools off.
+    resp = _create_completion(client, messages, tools=None,
+                              max_completion_tokens=1000)
+    return (resp.choices[0].message.content
+            or "I ran into trouble completing that — please try rephrasing.")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
@@ -338,71 +728,42 @@ async def zapier_webhook(request: Request):
 
 @app.post("/roofr/update")
 async def update_roofr(update: RoofrUpdate, current_user: dict = Depends(get_current_user)):
-    """Send job updates to Roofr via Zapier webhook (bi-directional sync)"""
-    
-    if not ROOFR_WEBHOOK_URL:
-        raise HTTPException(status_code=503, detail="Roofr webhook URL not configured")
-    
+    """Update a job from the UI/agent: always save locally, then push to Roofr
+    best-effort. Uses the same helpers as the AI agent so behaviour is identical.
+    Does NOT 503 when the outbound Roofr webhook is unconfigured — the local save
+    is the source of truth and must never be lost; the sync is reported as
+    'not configured' instead."""
     db = load_db()
-    
+
     if update.job_id not in db["jobs"]:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = db["jobs"][update.job_id]
-    
-    if update.status:
-        job["status"] = update.status
-    
+
+    sync = "not configured"
+    changed = False
+
+    if update.status or update.workflow_stage:
+        r = _op_update_job_status(db, update.job_id, update.status,
+                                  update.workflow_stage, current_user["email"])
+        sync = r.get("roofr_sync", sync)
+        changed = True
+
     if update.notes:
-        if "notes" not in job:
-            job["notes"] = []
-        job["notes"].append({
-            "note": update.notes,
-            "added_by": current_user["email"],
-            "added_at": datetime.now().isoformat()
-        })
-    
-    if update.workflow_stage:
-        job["workflow_stage"] = update.workflow_stage
-    
+        r = _op_add_job_note(db, update.job_id, update.notes, current_user["email"])
+        sync = r.get("roofr_sync", sync)
+        changed = True
+
     if update.data:
-        job.update(update.data)
-    
-    save_db(db)
-    
-    payload = {
-        "job_id": update.job_id,
-        "status": job.get("status"),
-        "workflow_stage": job.get("workflow_stage"),
-        "client_name": job.get("client_name"),
-        "address": job.get("address"),
-        "updated_by": current_user["email"],
-        "updated_at": datetime.now().isoformat()
-    }
-    
-    if update.notes:
-        payload["new_note"] = update.notes
-    
-    if update.data:
-        payload.update(update.data)
-    
-    try:
-        import requests
-        response = requests.post(ROOFR_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        
-        return {
-            "status": "ok",
-            "message": "Job updated locally and synced to Roofr",
-            "job_id": update.job_id,
-            "roofr_response": response.status_code
-        }
-    except Exception as e:
-        return {
-            "status": "partial",
-            "message": f"Job updated locally but failed to sync to Roofr: {str(e)}",
-            "job_id": update.job_id
-        }
+        db["jobs"][update.job_id].update(update.data)
+        save_db(db)
+        changed = True
+
+    if not changed:
+        return {"status": "ok", "job_id": update.job_id,
+                "message": "Nothing to update", "roofr_sync": sync}
+
+    status = "ok" if sync in ("synced", "not configured") else "partial"
+    return {"status": status, "job_id": update.job_id, "roofr_sync": sync,
+            "message": f"Job {update.job_id} updated (Roofr sync: {sync})"}
 
 @app.post("/quickbooks/webhook")
 async def quickbooks_webhook(webhook: QuickBooksWebhook):
@@ -601,19 +962,27 @@ async def upload_document(
     description: str = Form(""),
     current_user: dict = Depends(get_current_user)
 ):
-    os.makedirs("documents", exist_ok=True)
-    
+    os.makedirs(DOCUMENTS_DIR, exist_ok=True)
+
+    db = load_db()
+    # Monotonic id based on the highest existing numeric id, so deleting a
+    # document never causes the next upload to collide with / overwrite another.
+    existing_ids = [int(k) for k in db["documents"].keys() if str(k).isdigit()]
+    doc_id = str((max(existing_ids) + 1) if existing_ids else 1)
+
+    # Sanitize the filename: strip any path components (block path traversal),
+    # fall back to a default, and prefix with the doc_id so same-named uploads
+    # don't overwrite each other on disk.
+    safe_name = os.path.basename(file.filename or "").strip() or "upload"
     file_content = await file.read()
-    file_path = f"documents/{file.filename}"
-    
+    file_path = os.path.join(DOCUMENTS_DIR, f"{doc_id}_{safe_name}")
+
     with open(file_path, "wb") as f:
         f.write(file_content)
-    
-    db = load_db()
-    doc_id = str(len(db["documents"]) + 1)
+
     db["documents"][doc_id] = {
         "id": doc_id,
-        "filename": file.filename,
+        "filename": safe_name,
         "filepath": file_path,
         "description": description,
         "uploaded_by": current_user["email"],
@@ -621,7 +990,7 @@ async def upload_document(
     }
     save_db(db)
     
-    return {"status": "ok", "doc_id": doc_id, "filename": file.filename}
+    return {"status": "ok", "doc_id": doc_id, "filename": safe_name}
 
 @app.get("/documents")
 async def get_documents(current_user: dict = Depends(get_current_user)):
@@ -830,6 +1199,7 @@ async def chat(message: ChatMessage, current_user: dict = Depends(get_current_us
         }
 
     user_email = current_user["email"]
+    user_role = current_user.get("role", "user")
     if user_email not in db["chat_history"]:
         db["chat_history"][user_email] = []
 
@@ -838,119 +1208,32 @@ async def chat(message: ChatMessage, current_user: dict = Depends(get_current_us
         "content": message.message,
         "timestamp": datetime.now().isoformat()
     })
-    
-    user_role = current_user.get("role", "user")
-    
-    if user_role == "user":
-        system_prompt = f"""You are an AI assistant for Truline Roofing, a commercial roofing company. 
-You help field crew and sales people with job information and administrative tasks.
 
-Current available data:
-- Jobs: {json.dumps(db['jobs'], indent=2)}
-- Documents: {json.dumps(db['documents'], indent=2)}
-
-You can help with:
-- Viewing job details and status
-- Updating job status (automatically syncs to Roofr CRM)
-- Adding notes to jobs (automatically syncs to Roofr CRM)
-- Uploading job photos
-- Sending emails (with document attachments)
-- Sending SMS text messages
-- General roofing project questions
-
-COMMUNICATION CAPABILITIES:
-- Send emails to customers with subject, body, and optional document attachments
-- Send SMS text messages for quick notifications
-- Attach documents from the document library to emails
-- All communications are tracked with sender and timestamp
-
-IMPORTANT RESTRICTIONS for this user role:
-- You MUST NOT provide any financial information (invoices, costs, profits, expenses, purchase orders)
-- If asked about financials, politely respond: "You don't have access to financial data. Please contact your manager."
-- Focus on operational and customer-facing tasks only
-
-BI-DIRECTIONAL CRM SYNC:
-- When you update job status or add notes, changes automatically sync to Roofr CRM
-- You can move jobs through workflow stages (Lead → Quote → Approved → In Progress → Complete)
-- All updates are tracked with user email and timestamp
-
-User: {user_email}
-Role: Field Crew / Sales (Limited Access)
-"""
-    else:
-        financials_data = "" if user_role == "user" else f"\n- Financials: {json.dumps(db.get('financials', {}), indent=2)}"
-        
-        system_prompt = f"""You are an AI assistant for Truline Roofing, a commercial roofing company. 
-You help manage jobs, documents, financials, and CRM data from Roofr.
-
-Current available data:
-- Jobs: {json.dumps(db['jobs'], indent=2)}
-- Documents: {json.dumps(db['documents'], indent=2)}{financials_data}
-
-You can help with:
-- Viewing and summarizing job details and financials
-- Updating job status and workflow stages (automatically syncs to Roofr CRM)
-- Adding notes to jobs (automatically syncs to Roofr CRM)
-- Calculating profitability per job (revenue - costs = profit, margin %)
-- Providing information about documents
-- Sending emails (with document attachments)
-- Sending SMS text messages
-- Answering questions about roofing projects
-- Creating financial reports and summaries
-
-COMMUNICATION CAPABILITIES:
-- Send emails to customers, vendors, or crew with subject, body, and document attachments
-- Send SMS text messages for urgent notifications
-- Attach invoices, estimates, or reports from document library
-- All communications tracked with sender and timestamp
-
-BI-DIRECTIONAL CRM SYNC:
-- When you update job status or add notes, changes automatically sync to Roofr CRM
-- You can move jobs through workflow stages (Lead → Quote → Approved → In Progress → Complete)
-- All updates are tracked with user email and timestamp
-- Use workflow_stage parameter to move jobs through sales pipeline
-
-FINANCIAL DATA ACCESS:
-- Full access to invoices and expenses from QuickBooks
-- Calculate job profitability: total revenue - total costs = profit
-- Compute profit margins: (profit / revenue) × 100
-- Track financial performance across all jobs
-
-You have full access to all company data including financial information.
-
-User: {user_email}
-Role: {"Super Admin (Full Access)" if user_role == "super_admin" else "Manager (View All)"}
-"""
-    
+    # Lean, role-scoped system prompt (compact job summary, not the whole DB) +
+    # tools for details and actions. The agent can now actually DO things —
+    # update job status, add notes (both sync to Roofr), send email/SMS, and
+    # (manager+ only) read financials — not just talk about them.
+    system_prompt = _build_chat_system_prompt(db, user_email, user_role)
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    
-    for msg in db["chat_history"][user_email][-10:]:
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
-    
+    for msg in db["chat_history"][user_email][-8:]:
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+    tools = tools_for_role(user_role)
+
     try:
-        response = client.chat.completions.create(
-            model="gpt-5.5",
-            messages=messages,  # type: ignore
-            max_completion_tokens=1000
-        )
-        
-        assistant_message = response.choices[0].message.content
-        
-        db["chat_history"][user_email].append({
-            "role": "assistant",
-            "content": assistant_message,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        save_db(db)
-        
-        return {"response": assistant_message}
-    
+        assistant_message = _run_agent_loop(client, messages, tools, current_user, db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
+
+    db["chat_history"][user_email].append({
+        "role": "assistant",
+        "content": assistant_message,
+        "timestamp": datetime.now().isoformat()
+    })
+    save_db(db)
+
+    return {"response": assistant_message}
 
 @app.post("/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...), current_user: dict = Depends(get_current_user)):

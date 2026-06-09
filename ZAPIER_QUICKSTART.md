@@ -1,16 +1,15 @@
 # Zapier Quick Setup Guide for Fred Wolfe
 
-## Your Webhook Configuration (Copy These Exact Values)
+> **Note (current):** The live app is on Railway, and the Roofr "Stage Changed" + "Lead Created" Zaps are already set up. See `docs/handoff.md` for the up-to-date field mappings. This guide remains a generic reference for adding new Zaps. Your real webhook secret is shown (with a Copy button) in the app's **Admin tab**, and is also the `ZAPIER_SECRET` value in Railway → Variables. Never commit the real secret.
+
+## Your Webhook Configuration
 
 **Webhook URL:**
 ```
-https://workspace-fredwolfe.replit.app/zapier/webhook
+https://truagent-production.up.railway.app/zapier/webhook
 ```
 
-**Webhook Secret:**
-```
-jSlhh7mtn2jmq2EvNgZ7-FIUJX-4loCRW-KlNArx1xE
-```
+**Webhook Secret:** copy the live value from the app's **Admin tab** (shown below as `<YOUR_ZAPIER_SECRET>`).
 
 ---
 
@@ -28,7 +27,7 @@ In your Zap's "Webhooks by Zapier" action:
 
 2. **URL**: Paste this exactly:
    ```
-   https://workspace-fredwolfe.replit.app/zapier/webhook
+   https://truagent-production.up.railway.app/zapier/webhook
    ```
 
 3. **Payload Type**: Select "JSON"
@@ -37,7 +36,7 @@ In your Zap's "Webhooks by Zapier" action:
 
    **Field 1 - secret** (REQUIRED):
    ```
-   jSlhh7mtn2jmq2EvNgZ7-FIUJX-4loCRW-KlNArx1xE
+   <YOUR_ZAPIER_SECRET>
    ```
    ⚠️ This must be the EXACT value above. Copy/paste it.
 
@@ -74,7 +73,7 @@ In your Zap's "Webhooks by Zapier" action:
 Here's exactly how your Data section should look:
 
 ```
-secret: jSlhh7mtn2jmq2EvNgZ7-FIUJX-4loCRW-KlNArx1xE
+secret: <YOUR_ZAPIER_SECRET>
 job_id: {{Roofr Job ID}}
 client_name: {{Roofr Client Name}}
 address: {{Roofr Address}}
@@ -93,7 +92,7 @@ The `{{Roofr ...}}` parts will be replaced by actual Roofr fields when you selec
 ## Troubleshooting
 
 ### Error: "Invalid webhook secret"
-- Make sure you copied the secret EXACTLY: `jSlhh7mtn2jmq2EvNgZ7-FIUJX-4loCRW-KlNArx1xE`
+- Make sure you copied the secret EXACTLY: `<YOUR_ZAPIER_SECRET>`
 - No spaces before or after
 - Must be in a field called "secret"
 
@@ -113,7 +112,7 @@ The `{{Roofr ...}}` parts will be replaced by actual Roofr fields when you selec
 ## Quick Reference
 
 **Login to your AI Agent:**
-- URL: https://workspace-fredwolfe.replit.app
+- URL: https://truagent-production.up.railway.app
 - Email: fred@trulineroofing.com
 - Password: truline2024
 

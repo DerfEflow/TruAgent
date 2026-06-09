@@ -17,6 +17,9 @@ dormant — the app runs and is fully reviewable without any of them.
 | `EMAIL_WEBHOOK_URL` | Where to send emails (Gmail/SendGrid via Zapier) | Zapier webhook URL | Email feature returns "not configured" |
 | `SMS_WEBHOOK_URL` | Where to send texts (Twilio via Zapier) | Zapier webhook URL | SMS feature returns "not configured" |
 | `PORT` | Local server port | Optional | Defaults to `5000` |
+| `OPENAI_MODEL` | Which OpenAI chat model the AI agent uses | Optional | Defaults to `gpt-5.5`; falls back to `OPENAI_FALLBACK_MODEL` if rejected |
+| `OPENAI_FALLBACK_MODEL` | Known-good model used if `OPENAI_MODEL` is unavailable | Optional | Defaults to `gpt-4o-mini` |
+| `DATA_DIR` | Folder holding `db.json` + uploaded `documents/` | **Production: set to a mounted persistent volume** (e.g. `/data` on Railway) so data survives redeploys | Defaults to the project folder (fine for local dev; **ephemeral on Railway if left unset**) |
 
 ## Generating strong secret values
 
