@@ -34,6 +34,9 @@ documents/
 env/
 venv/
 
+# Claude Code local (personal, machine-specific) settings
+.claude/settings.local.json
+
 # IDE
 .vscode/
 .idea/
