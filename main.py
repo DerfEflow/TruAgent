@@ -62,6 +62,9 @@ PRODUCTION_SECRET = os.getenv("PRODUCTION_SECRET", "change_production_secret_in_
 LEADS_SECRET = os.getenv("LEADS_SECRET", "change_leads_secret_in_production")
 CRON_SECRET = os.getenv("CRON_SECRET", "change_cron_secret_in_production")
 ESIGN_WEBHOOK_URL = os.getenv("ESIGN_WEBHOOK_URL", "")
+# Shared secret for the inbound e-sign callback (S33/O57). Separate from the
+# outbound ESIGN_WEBHOOK_URL above.
+ESIGN_SECRET = os.getenv("ESIGN_SECRET", "change_esign_secret_in_production")
 
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is the id confirmed working on this account; a known-good fallback is
@@ -134,11 +137,59 @@ _PREP_ITEMS_BY_SUBSTRATE = {
     "default":  ["clean", "ponding_addressed", "seams_sealed", "primer"],
 }
 
+def _seed_db() -> dict:
+    """A fresh database seeded with the three demo logins and all collections."""
+    return {
+        "jobs": {},
+        "documents": {},
+        "chat_history": {},
+        "financials": {"invoices": {}, "expenses": {}},
+        "weather_profiles": {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()},
+        "templates": {},
+        "sds": {},
+        "employees": {},
+        "parties": {},
+        "opportunities": {},
+        "equipment": {},
+        "doc_chunks": {},
+        "cron_log": [],
+        "pending_voice_reports": [],
+        "users": {
+            "fred@trulineroofing.com": {
+                "email": "fred@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"truline2024").hexdigest(),
+                "role": "super_admin"
+            },
+            "fieldcrew@trulineroofing.com": {
+                "email": "fieldcrew@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"roof123").hexdigest(),
+                "role": "user"
+            },
+            "office@trulineroofing.com": {
+                "email": "office@trulineroofing.com",
+                "password_hash": hashlib.sha256(b"office123").hexdigest(),
+                "role": "manager"
+            }
+        }
+    }
+
+
 def load_db():
     if os.path.exists(db_file):
-        with open(db_file, 'r') as f:
-            db = json.load(f)
-        
+        try:
+            with open(db_file, 'r') as f:
+                db = json.load(f)
+        except (json.JSONDecodeError, OSError, ValueError):
+            # Corrupt/unreadable db.json — move it aside for forensics and reseed,
+            # rather than 500-ing every request (load_db runs on every route).
+            try:
+                os.replace(db_file, db_file + ".corrupt." + datetime.now().strftime("%Y%m%d%H%M%S"))
+            except OSError:
+                pass
+            db = _seed_db()
+            save_db(db)
+            return db
+
         needs_migration = False
 
         for email, user_data in db.get("users", {}).items():
@@ -161,53 +212,28 @@ def load_db():
         if "cron_log" not in db:
             db["cron_log"] = []
             needs_migration = True
+        if "pending_voice_reports" not in db:
+            db["pending_voice_reports"] = []
+            needs_migration = True
         if not db.get("weather_profiles"):
             db["weather_profiles"] = {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()}
             needs_migration = True
         if "financials" not in db:
             db["financials"] = {}
+            needs_migration = True
         if "invoices" not in db.get("financials", {}):
             db.setdefault("financials", {})["invoices"] = {}
+            needs_migration = True
         if "expenses" not in db.get("financials", {}):
             db.setdefault("financials", {})["expenses"] = {}
+            needs_migration = True
 
         if needs_migration:
             save_db(db)
 
         return db
 
-    return {
-        "jobs": {},
-        "documents": {},
-        "chat_history": {},
-        "financials": {"invoices": {}, "expenses": {}},
-        "weather_profiles": {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()},
-        "templates": {},
-        "sds": {},
-        "employees": {},
-        "parties": {},
-        "opportunities": {},
-        "equipment": {},
-        "doc_chunks": {},
-        "cron_log": [],
-        "users": {
-            "fred@trulineroofing.com": {
-                "email": "fred@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"truline2024").hexdigest(),
-                "role": "super_admin"
-            },
-            "fieldcrew@trulineroofing.com": {
-                "email": "fieldcrew@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"roof123").hexdigest(),
-                "role": "user"
-            },
-            "office@trulineroofing.com": {
-                "email": "office@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"office123").hexdigest(),
-                "role": "manager"
-            }
-        }
-    }
+    return _seed_db()
 
 def save_db(data):
     # Atomic write: dump to a temp file in the same directory, then os.replace()
@@ -411,6 +437,16 @@ class QAReadingRequest(BaseModel):
     wet_mil: Optional[List[float]] = None
     notes: Optional[str] = None
 
+class WeatherApplicationCheckRequest(BaseModel):
+    temp: Optional[float] = None            # ambient air temp (°F)
+    surface_temp: Optional[float] = None    # substrate/surface temp (°F)
+    rh: Optional[float] = None              # relative humidity (%)
+    dewpoint: Optional[float] = None        # dewpoint (°F)
+    wind: Optional[float] = None            # wind speed (mph)
+    rain_free_hrs_actual: Optional[float] = None   # POST-application rain-free hours achieved
+    coat_seq: Optional[int] = None
+    notes: Optional[str] = None
+
 class CoatLogRequest(BaseModel):
     product: str
     coat_seq: int
@@ -456,6 +492,16 @@ class ESignRequest(BaseModel):
     document_type: str = "proposal"
     message: Optional[str] = None
 
+class ESignWebhook(BaseModel):
+    secret: str
+    document_id: Optional[str] = None
+    opportunity_id: Optional[str] = None
+    job_id: Optional[str] = None
+    status: str = "signed"   # signed | viewed | declined
+    signed_pdf_url: Optional[str] = None
+    signed_pdf_document_id: Optional[str] = None
+    data: Optional[dict] = None
+
 class TimelogRequest(BaseModel):
     employee: str
     arrive: str
@@ -466,6 +512,13 @@ class TimelogRequest(BaseModel):
 class PartyRequest(BaseModel):
     name: str
     party_type: str = "sub"   # sub | vendor
+    trade: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+
+class PartyUpdate(BaseModel):
+    w9: Optional[bool] = None
+    subcontract: Optional[bool] = None
     trade: Optional[str] = None
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
@@ -531,6 +584,7 @@ class AssignmentRequest(BaseModel):
     crew: str
     date: str   # YYYY-MM-DD
     phase: Optional[str] = None
+    equipment_id: Optional[str] = None   # specific rig/lift from the equipment registry
     notes: Optional[str] = None
 
 class EquipmentRequest(BaseModel):
@@ -718,6 +772,29 @@ def _compact_job(job: dict) -> dict:
         "address", "assigned_to") if job.get(k) not in (None, "")}
 
 
+# Financial fields the field-crew ('user') role must never see on a job object.
+# Top-level money keys are dropped entirely; the budget block keeps operational
+# fields (sqft, system, substrate, est_gallons, dry_mil_target, labor hours) but
+# loses every dollar value.
+_JOB_MONEY_TOP_KEYS = ("invoices", "expenses", "billing", "change_orders",
+                       "draws", "job_value", "estimate")
+_JOB_MONEY_BUDGET_KEYS = ("contract_value", "quoted_margin", "loaded_labor_rate",
+                          "material_cost_per_gal")
+
+
+def _strip_job_financials(job: dict) -> dict:
+    """Return a copy of a job with all financial data removed, for the field-crew
+    ('user') role. Operational/production fields are preserved so the crew can
+    still work the job; only money is stripped. Enforced at the data layer so a
+    field token can never read financials even by calling the API directly."""
+    safe = {k: v for k, v in job.items() if k not in _JOB_MONEY_TOP_KEYS}
+    budget = safe.get("budget")
+    if isinstance(budget, dict):
+        safe["budget"] = {k: v for k, v in budget.items()
+                          if k not in _JOB_MONEY_BUDGET_KEYS}
+    return safe
+
+
 # ─── Coating / production helpers ────────────────────────────────────────────
 
 def _get_volume_solids(system: str) -> float:
@@ -842,8 +919,9 @@ def _weather_verdict_from_forecast(forecast: dict, profile: dict) -> dict:
     if rh and max(rh) > profile.get("rh_max", 85):
         flags.append(f"Humidity too high ({max(rh):.0f}% > {profile['rh_max']}%)")
     cure_hrs = int(profile.get("min_cure_before_rain_hrs", 4))
-    if precip:
-        if max(precip[:cure_hrs] if len(precip) >= cure_hrs else precip) > 40:
+    if precip and cure_hrs > 0:
+        window = precip[:cure_hrs]  # never empty here (precip truthy, cure_hrs > 0)
+        if window and max(window) > 40:
             flags.append(f"Rain risk within {cure_hrs}h cure window — warranty may be voided")
 
     verdict = "GREEN" if not flags else (
@@ -932,8 +1010,49 @@ def _ar_aging_buckets(db: dict) -> dict:
     return buckets
 
 
+def _recompute_cleared(party: dict) -> bool:
+    """O47: a party is 'cleared to work' when it has at least one unexpired COI,
+    a W-9 on file, and (for subcontractors) a signed subcontract."""
+    has_valid_coi = False
+    for c in party.get("cois", []):
+        try:
+            if datetime.fromisoformat(c.get("expiry") or "") > datetime.now():
+                has_valid_coi = True
+                break
+        except Exception:
+            pass
+    needs_subcontract = party.get("party_type") == "sub"
+    party["cleared"] = bool(has_valid_coi and party.get("w9")
+                            and (not needs_subcontract or party.get("subcontract")))
+    return party["cleared"]
+
+
+def _sds_gaps(db: dict) -> list:
+    """Coating products referenced on jobs that have no SDS on file (OSHA HazCom
+    gap — O50/O52). Matched case-insensitively by product name."""
+    on_file = set()
+    for s in (db.get("sds") or {}).values():
+        prod = (s.get("product") or "").strip().lower()
+        if prod:
+            on_file.add(prod)
+    referenced = set()
+    for job in (db.get("jobs") or {}).values():
+        for prod in ((job.get("budget") or {}).get("est_gallons") or {}):
+            if prod:
+                referenced.add(str(prod).strip().lower())
+        for log in job.get("production_logs") or []:
+            for prod in (log.get("gallons_by_product") or {}):
+                if prod:
+                    referenced.add(str(prod).strip().lower())
+            if log.get("product"):
+                referenced.add(str(log["product"]).strip().lower())
+    return sorted(p for p in referenced if p and p not in on_file)
+
+
 def _compliance_summary(db: dict) -> dict:
-    """Roll up expiring/missing COIs, certs, and uncleared parties."""
+    """Roll up expiring/missing COIs, certs, uncleared parties, and SDS gaps.
+    Each entry carries both a `party`/`employee` and a `name` alias plus the raw
+    `expiry` date, so the dashboard and the AI tool can render it directly."""
     now = datetime.now()
     warn_days = 30
     expiring_cois = []
@@ -943,8 +1062,9 @@ def _compliance_summary(db: dict) -> dict:
                 exp = datetime.fromisoformat(coi.get("expiry") or "")
                 days = (exp - now).days
                 if days <= warn_days:
-                    expiring_cois.append({"party": party.get("name"), "party_id": pid,
-                                          "carrier": coi.get("carrier"), "days_until_expiry": days})
+                    expiring_cois.append({"party": party.get("name"), "name": party.get("name"),
+                                          "party_id": pid, "carrier": coi.get("carrier"),
+                                          "expiry": coi.get("expiry"), "days_until_expiry": days})
             except Exception:
                 pass
     expiring_certs = []
@@ -956,17 +1076,19 @@ def _compliance_summary(db: dict) -> dict:
                 exp = datetime.fromisoformat(cert["expiry"])
                 days = (exp - now).days
                 if days <= warn_days:
-                    expiring_certs.append({"employee": emp.get("name"), "employee_id": eid,
-                                           "cert_type": cert.get("cert_type"), "days_until_expiry": days})
+                    expiring_certs.append({"employee": emp.get("name"), "name": emp.get("name"),
+                                           "employee_id": eid, "cert_type": cert.get("cert_type"),
+                                           "expiry": cert.get("expiry"), "days_until_expiry": days})
             except Exception:
                 pass
     uncleared = [
-        {"party": p.get("name"), "id": pid, "type": p.get("party_type")}
+        {"party": p.get("name"), "name": p.get("name"), "id": pid, "type": p.get("party_type")}
         for pid, p in (db.get("parties") or {}).items()
         if not p.get("cleared")
     ]
     return {"expiring_cois": expiring_cois, "expiring_certs": expiring_certs,
-            "uncleared_parties": uncleared, "checked_at": datetime.now().isoformat()}
+            "uncleared_parties": uncleared, "sds_gaps": _sds_gaps(db),
+            "checked_at": datetime.now().isoformat()}
 
 
 def _send_email_or_log(db: dict, to: str, subject: str, body: str, sent_by: str) -> str:
@@ -1121,8 +1243,8 @@ def execute_agent_tool(name: str, args: dict, current_user: dict, db: dict) -> d
         job = db["jobs"].get(args.get("job_id"))
         if not job:
             return {"status": "error", "message": "Job not found"}
-        if role == "user":  # hide financial id-lists from field crew
-            job = {k: v for k, v in job.items() if k not in ("invoices", "expenses")}
+        if role == "user":  # strip all financials (budget money, invoices, expenses…) for field crew
+            job = _strip_job_financials(job)
         return {"status": "ok", "job": job}
     if name == "update_job_status":
         return _op_update_job_status(db, args.get("job_id"), args.get("status"),
@@ -1440,11 +1562,15 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = db["jobs"].get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if current_user.get("role") == "user":
+        return _strip_job_financials(job)
     return job
 
 @app.get("/jobs")
 async def get_all_jobs(current_user: dict = Depends(get_current_user)):
     db = load_db()
+    if current_user.get("role") == "user":
+        return {"jobs": {jid: _strip_job_financials(j) for jid, j in db["jobs"].items()}}
     return {"jobs": db["jobs"]}
 
 @app.get("/zapier/webhook")
@@ -1882,12 +2008,18 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
         return {"status": "error", "message": "Job not found"}
     
     elif action.action == "list_jobs":
-        return {"status": "ok", "jobs": db["jobs"]}
-    
+        jobs = db["jobs"]
+        if current_user.get("role") == "user":
+            jobs = {jid: _strip_job_financials(j) for jid, j in jobs.items()}
+        return {"status": "ok", "jobs": jobs}
+
     elif action.action == "get_job_details":
         job_id = action.parameters.get("job_id")
         if job_id in db["jobs"]:
-            return {"status": "ok", "job": db["jobs"][job_id]}
+            job = db["jobs"][job_id]
+            if current_user.get("role") == "user":
+                job = _strip_job_financials(job)
+            return {"status": "ok", "job": job}
         return {"status": "error", "message": "Job not found"}
     
     elif action.action == "list_documents":
@@ -2408,7 +2540,7 @@ async def coverage_reconciliation(job_id: str, current_user: dict = Depends(get_
     applied = _applied_gallons_by_product(job)
     total_applied = sum(applied.values())
     achieved = _calc_achieved_dry_mil(total_applied, sqft, vs)
-    warranty_min = (job.get("warranty") or {}).get("required_mil") or dry_mil_target
+    warranty_min = float((job.get("warranty") or {}).get("required_mil") or dry_mil_target or 0)
     wet_mil_readings = [r for log in job.get("production_logs", []) for r in (log.get("wet_mil") or [])]
     avg_wet_mil = round(sum(wet_mil_readings) / len(wet_mil_readings), 2) if wet_mil_readings else None
     flag = None
@@ -2463,7 +2595,8 @@ async def company_dashboard(current_user: dict = Depends(get_manager_or_above)):
     active_jobs = 0
     for job in jobs:
         revenue = sum(float(inv_map.get(i, {}).get("amount", 0) or 0)
-                      for i in job.get("invoices", []))
+                      for i in job.get("invoices", [])
+                      if inv_map.get(i, {}).get("status") != "cancelled")
         cost = sum(float(exp_map.get(e, {}).get("amount", 0) or 0)
                    for e in job.get("expenses", []))
         total_revenue += revenue
@@ -2503,7 +2636,8 @@ async def wip_report(current_user: dict = Depends(get_manager_or_above)):
         pct = _production_pct_complete(job) / 100.0
         earned = round(contract * pct, 2)
         billed = sum(float(inv_map.get(i, {}).get("amount", 0) or 0)
-                     for i in job.get("invoices", []))
+                     for i in job.get("invoices", [])
+                     if inv_map.get(i, {}).get("status") != "cancelled")
         position = earned - billed
         rows.append({"job_id": jid, "client": job.get("client_name"),
                      "contract": contract, "pct_complete": pct * 100,
@@ -2528,16 +2662,19 @@ async def add_draw(job_id: str, req: DrawRequest,
     job = db["jobs"].get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    billing = job.setdefault("billing", {"draws": [], "retainage_pct": req.retainage_pct})
-    retainage = round(req.amount * (req.retainage_pct / 100), 2)
+    # retainage_pct may arrive as an explicit null (Pydantic only fills the 10.0
+    # default for a MISSING key), so coerce None back to the documented default.
+    pct = req.retainage_pct if req.retainage_pct is not None else 10.0
+    billing = job.setdefault("billing", {"draws": [], "retainage_pct": pct})
+    retainage = round(req.amount * (pct / 100), 2)
     net = round(req.amount - retainage, 2)
     draw = {"id": f"draw_{len(billing.get('draws', [])) + 1}",
             "description": req.description, "milestone": req.milestone,
-            "gross_amount": req.amount, "retainage_pct": req.retainage_pct,
+            "gross_amount": req.amount, "retainage_pct": pct,
             "retainage_held": retainage, "net_invoice": net,
             "created_at": datetime.now().isoformat(), "status": "pending"}
     billing.setdefault("draws", []).append(draw)
-    billing["retainage_pct"] = req.retainage_pct
+    billing["retainage_pct"] = pct
     save_db(db)
     return {"status": "ok", "draw": draw, "message": f"Draw created — net invoice: ${net}"}
 
@@ -2577,6 +2714,49 @@ async def ar_aging(current_user: dict = Depends(get_manager_or_above)):
     buckets = _ar_aging_buckets(db)
     totals = {k: sum(i.get("amount") or 0 for i in v) for k, v in buckets.items()}
     return {"status": "ok", "buckets": buckets, "totals": totals}
+
+@app.post("/financials/ar-aging/{invoice_id}/remind")
+async def ar_send_reminder(invoice_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A16: one-click payment reminder for an overdue invoice via the comms webhooks."""
+    db = load_db()
+    inv = db.get("financials", {}).get("invoices", {}).get(invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("status") in ("paid", "cancelled"):
+        return {"status": "error", "message": f"Invoice is {inv.get('status')} — no reminder needed"}
+    job = db["jobs"].get(inv.get("job_id")) or {}
+    to_email = job.get("customer_email") or job.get("contact_email")
+    to_phone = job.get("customer_phone") or job.get("contact_phone")
+    if not to_email and not to_phone:
+        return {"status": "error", "message": "No customer contact on file for the linked job"}
+    now = datetime.now()
+    try:
+        due = datetime.fromisoformat(inv.get("due_date") or inv.get("date") or now.isoformat())
+        days_past_due = (now - due).days
+    except Exception:
+        days_past_due = None
+    subject = f"Payment reminder — invoice {invoice_id}"
+    body = (f"Hello {inv.get('customer_name') or 'there'},\n\n"
+            f"A friendly reminder that invoice {invoice_id} for ${inv.get('amount')} is past due"
+            + (f" by {days_past_due} days" if days_past_due else "") + ".\n\n"
+            f"Please reach out with any questions. Thank you,\nTruline Roofing")
+    email_status = sms_status = None
+    if to_email:
+        email_status = _send_email_or_log(db, to_email, subject, body, current_user["email"])
+    if to_phone and SMS_WEBHOOK_URL:
+        try:
+            import requests
+            requests.post(SMS_WEBHOOK_URL, json={"to": to_phone, "message": body,
+                          "sent_by": current_user["email"], "sent_at": now.isoformat()},
+                          timeout=10).raise_for_status()
+            sms_status = "sent"
+        except Exception as e:
+            sms_status = f"error: {e}"
+    inv.setdefault("reminders", []).append({"sent_by": current_user["email"],
+        "sent_at": now.isoformat(), "email_status": email_status, "sms_status": sms_status})
+    save_db(db)
+    return {"status": "ok", "invoice_id": invoice_id, "days_past_due": days_past_due,
+            "email_status": email_status, "sms_status": sms_status}
 
 @app.get("/financials/ap-aging")
 async def ap_aging(current_user: dict = Depends(get_manager_or_above)):
@@ -2744,27 +2924,41 @@ async def submit_prep_signoff(job_id: str, req: PrepSignoffRequest,
             "message": "Prep sign-off complete — ready to coat" if not missing else f"Blocked: {', '.join(missing)}"}
 
 @app.post("/job/{job_id}/weather-application-check")
-async def weather_application_check(job_id: str, req: QAReadingRequest,
+async def weather_application_check(job_id: str, req: WeatherApplicationCheckRequest,
                                      current_user: dict = Depends(get_current_user)):
-    """P23: Record actual weather conditions at time of application vs. spec window."""
+    """P23: Record actual weather conditions at the time of application vs. the
+    per-system spec window — temp / surface / RH / dewpoint / wind at apply time,
+    plus POST-application rain-free hours achieved vs. min-cure-before-rain."""
     db = load_db()
     job = db["jobs"].get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    notes_dict = json.loads(req.notes) if req.notes and req.notes.startswith("{") else {}
-    actual = notes_dict or {}
+    actual = {"temp": req.temp, "surface_temp": req.surface_temp, "rh": req.rh,
+              "dewpoint": req.dewpoint, "wind": req.wind,
+              "rain_free_hrs_actual": req.rain_free_hrs_actual}
     system = (job.get("budget") or {}).get("system") or job.get("coating_system") or "default"
     profile = db.get("weather_profiles", _DEFAULT_WEATHER_PROFILES).get(system.lower(), {})
     flags = []
-    if actual.get("temp") and float(actual["temp"]) < float(profile.get("temp_min", 40)):
+    if req.temp is not None and req.temp < float(profile.get("temp_min", 40)):
         flags.append("temp_below_min")
-    if actual.get("rh") and float(actual["rh"]) > float(profile.get("rh_max", 85)):
+    if req.surface_temp is not None and profile.get("surface_min") is not None \
+            and req.surface_temp < float(profile["surface_min"]):
+        flags.append("surface_below_min")
+    if req.rh is not None and req.rh > float(profile.get("rh_max", 85)):
         flags.append("humidity_above_max")
-    if actual.get("rain_free_hrs_actual", 999) < float(profile.get("rain_free_hrs_apply", 2)):
-        flags.append("rain_free_window_insufficient")
+    # Surface within the spec margin of dewpoint risks condensation under the film.
+    if req.surface_temp is not None and req.dewpoint is not None \
+            and (req.surface_temp - req.dewpoint) < float(profile.get("surface_minus_dewpoint", 5)):
+        flags.append("surface_within_dewpoint_margin")
+    # Post-application rain-free hours achieved vs. the min cure-before-rain window
+    # (the warranty-critical field — NOT the pre-application apply window).
+    if req.rain_free_hrs_actual is not None \
+            and req.rain_free_hrs_actual < float(profile.get("min_cure_before_rain_hrs", 4)):
+        flags.append("min_cure_before_rain_not_met")
     record = {
         "actual_conditions": actual, "system": system, "profile_used": profile,
-        "out_of_window": len(flags) > 0, "flags": flags,
+        "out_of_window": len(flags) > 0, "flags": flags, "notes": req.notes,
+        "coat_seq": req.coat_seq,
         "recorded_by": current_user["email"], "recorded_at": datetime.now().isoformat(),
     }
     job.setdefault("weather_application_checks", []).append(record)
@@ -2820,7 +3014,18 @@ async def coat_windows(job_id: str, current_user: dict = Depends(get_current_use
     system = (job.get("budget") or {}).get("system") or ""
     profile = db.get("weather_profiles", {}).get(system.lower(), {})
     window_hrs = float(profile.get("inter_coat_window_hrs") or 4)
-    coats = sorted(job.get("coats", []), key=lambda c: c.get("seq", 0))
+    # Coats are derived from the F2 production logs (the actual writer of coat-level
+    # data) — grouped by coat_seq, using the earliest log per coat as applied_at.
+    by_seq: Dict[Any, dict] = {}
+    for log in job.get("production_logs", []):
+        seq = log.get("coat_seq")
+        if seq is None:
+            continue
+        applied_at = log.get("logged_at") or log.get("date")
+        cur = by_seq.get(seq)
+        if cur is None or (applied_at and applied_at < (cur.get("applied_at") or "")):
+            by_seq[seq] = {"seq": seq, "product": log.get("product"), "applied_at": applied_at}
+    coats = sorted(by_seq.values(), key=lambda c: c.get("seq") or 0)
     now = datetime.now()
     result = []
     for i, coat in enumerate(coats):
@@ -2950,7 +3155,12 @@ async def set_warranty(job_id: str, req: WarrantyRequest,
     if req.install_date and req.term_years and not req.renewal_recoat_due:
         try:
             install = datetime.fromisoformat(req.install_date)
-            renewal = install.replace(year=install.year + int(req.term_years))
+            target_year = install.year + int(req.term_years)
+            try:
+                renewal = install.replace(year=target_year)
+            except ValueError:
+                # Feb-29 install landing on a non-leap anniversary — clamp to Feb 28.
+                renewal = install.replace(year=target_year, day=28)
             w["renewal_recoat_due"] = renewal.strftime("%Y-%m-%d")
         except Exception:
             pass
@@ -3095,6 +3305,70 @@ async def esign_send(opportunity_id: str, req: ESignRequest,
     return {"status": "ok", "esign_record": esign_record,
             "note": "Configure ESIGN_WEBHOOK_URL to route via DocuSign/Zapier" if not ESIGN_WEBHOOK_URL else ""}
 
+
+def _apply_won_handoff(db: dict, opp: dict, actor: str) -> None:
+    """Mark an opportunity Won and sync its linked job to Roofr (S33/O57 handoff)."""
+    opp["stage"] = "Won"
+    opp["outcome"] = "won"
+    opp.setdefault("timeline", []).append({"event": "marked_won", "by": actor,
+                                           "at": datetime.now().isoformat()})
+    job_id = opp.get("job_id")
+    if job_id and job_id in db["jobs"]:
+        db["jobs"][job_id]["workflow_stage"] = "Won"
+        _sync_to_roofr({"job_id": job_id, "workflow_stage": "Won", "updated_by": actor,
+                        "updated_at": datetime.now().isoformat()})
+
+
+@app.post("/esign/webhook")
+async def esign_webhook(payload: ESignWebhook):
+    """S33/O57: inbound e-sign callback. On a 'signed' event, mark the matching
+    esign record signed, attach the executed PDF reference, and (for an
+    opportunity) flip the stage to Won and fire the production handoff."""
+    if payload.secret != ESIGN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid e-sign webhook secret")
+    db = load_db()
+    # Resolve the target by explicit id, else by scanning esign_records for the document.
+    target, target_kind = None, None
+    if payload.opportunity_id:
+        target = db.get("opportunities", {}).get(payload.opportunity_id)
+        target_kind = "opportunity"
+    if target is None and payload.job_id:
+        target = db["jobs"].get(payload.job_id)
+        target_kind = "job"
+    if target is None and payload.document_id:
+        for opp in db.get("opportunities", {}).values():
+            if any(r.get("document_id") == payload.document_id for r in opp.get("esign_records", [])):
+                target, target_kind = opp, "opportunity"
+                break
+        if target is None:
+            for job in db["jobs"].values():
+                if any(r.get("document_id") == payload.document_id for r in job.get("esign_records", [])):
+                    target, target_kind = job, "job"
+                    break
+    if target is None:
+        raise HTTPException(status_code=404, detail="No matching opportunity/job for this e-sign event")
+    # Update (or append) the matching esign record.
+    matched = next((r for r in target.get("esign_records", [])
+                    if payload.document_id and r.get("document_id") == payload.document_id), None)
+    if matched is None:
+        matched = {"document_id": payload.document_id}
+        target.setdefault("esign_records", []).append(matched)
+    matched["status"] = payload.status
+    matched["signed_at"] = datetime.now().isoformat()
+    if payload.signed_pdf_document_id:
+        matched["signed_pdf_document_id"] = payload.signed_pdf_document_id
+    if payload.signed_pdf_url:
+        matched["signed_pdf_url"] = payload.signed_pdf_url
+    target.setdefault("timeline", []).append({"event": f"esign_{payload.status}",
+        "document_id": payload.document_id, "at": datetime.now().isoformat()})
+    advanced_to_won = False
+    if payload.status == "signed" and target_kind == "opportunity":
+        _apply_won_handoff(db, target, "esign_webhook")
+        advanced_to_won = True
+    save_db(db)
+    return {"status": "ok", "matched_kind": target_kind,
+            "esign_status": payload.status, "advanced_to_won": advanced_to_won}
+
 @app.post("/job/{job_id}/review-request")
 async def schedule_review_request(job_id: str, req: ReviewRequest,
                                    current_user: dict = Depends(get_manager_or_above)):
@@ -3216,14 +3490,28 @@ async def add_assignment(req: AssignmentRequest,
     job = db["jobs"].get(req.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    # Check sprayer double-booking
-    if req.phase and "spray" in req.phase.lower():
+    # Hard-block double-booking a SPECIFIC rig (C42) when an equipment_id is given;
+    # otherwise fall back to the looser same-day spray-phase heuristic (C39) — and
+    # only against other un-rigged assignments so two crews each with their own rig
+    # are no longer falsely rejected.
+    if req.equipment_id:
+        if req.equipment_id not in db.get("equipment", {}):
+            raise HTTPException(status_code=404, detail="Equipment not found")
         for jid, j in db["jobs"].items():
             for a in j.get("schedule_assignments", []):
-                if a.get("date") == req.date and "spray" in (a.get("phase") or "").lower() and jid != req.job_id:
+                if a.get("date") == req.date and a.get("equipment_id") == req.equipment_id:
+                    rig = db["equipment"][req.equipment_id].get("name", req.equipment_id)
+                    return {"status": "conflict",
+                            "message": f"{rig} already booked on {req.date} (job {jid})"}
+    elif req.phase and "spray" in req.phase.lower():
+        for jid, j in db["jobs"].items():
+            for a in j.get("schedule_assignments", []):
+                if (a.get("date") == req.date and "spray" in (a.get("phase") or "").lower()
+                        and jid != req.job_id and not a.get("equipment_id")):
                     return {"status": "conflict", "message": f"Sprayer already assigned to job {jid} on {req.date}"}
     asgn = {"id": f"asgn_{int(datetime.now().timestamp() * 1000)}",
             "crew": req.crew, "date": req.date, "phase": req.phase,
+            "equipment_id": req.equipment_id,
             "notes": req.notes, "created_by": current_user["email"],
             "created_at": datetime.now().isoformat()}
     job.setdefault("schedule_assignments", []).append(asgn)
@@ -3253,7 +3541,8 @@ async def schedule_weather_verdicts(current_user: dict = Depends(get_current_use
     return {"status": "ok", "date": today, "scheduled_jobs": results}
 
 @app.get("/equipment")
-async def list_equipment(current_user: dict = Depends(get_current_user)):
+async def list_equipment(current_user: dict = Depends(get_manager_or_above)):
+    # day_rate is cost data — keep the registry manager+ only (no field-crew UI uses it).
     db = load_db()
     return {"status": "ok", "equipment": db.get("equipment", {})}
 
@@ -3393,13 +3682,26 @@ async def add_coi(party_id: str, req: COIRequest,
            "expiry": req.expiry, "gl_limit": req.gl_limit, "wc_limit": req.wc_limit,
            "document_id": req.document_id, "added_at": datetime.now().isoformat()}
     party.setdefault("cois", []).append(coi)
-    try:
-        exp = datetime.fromisoformat(req.expiry)
-        party["cleared"] = exp > datetime.now() and party.get("w9") is not False
-    except Exception:
-        pass
+    _recompute_cleared(party)
     save_db(db)
     return {"status": "ok", "coi": coi, "cleared": party.get("cleared")}
+
+@app.put("/parties/{party_id}")
+async def update_party(party_id: str, req: PartyUpdate,
+                       current_user: dict = Depends(get_manager_or_above)):
+    """O47: record W-9 / signed subcontract / contact updates and recompute the
+    party's 'cleared to work' status from its documents."""
+    db = load_db()
+    party = db.get("parties", {}).get(party_id)
+    if not party:
+        raise HTTPException(status_code=404, detail="Party not found")
+    for field in ("w9", "subcontract", "trade", "contact_email", "contact_phone"):
+        val = getattr(req, field, None)
+        if val is not None:
+            party[field] = val
+    _recompute_cleared(party)
+    save_db(db)
+    return {"status": "ok", "party": party}
 
 @app.get("/compliance/dashboard")
 async def compliance_dashboard_route(current_user: dict = Depends(get_manager_or_above)):
@@ -3704,12 +4006,20 @@ async def send_digest(secret: str = "", current_user: dict = Depends(get_current
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
     lines = [f"TruAgent Morning Digest — {today}"]
+    def _last_log_age_days(j):
+        logs = j.get("production_logs", [])[-1:]
+        if not logs:
+            return None
+        try:
+            return (now - datetime.fromisoformat(logs[0].get("date") or today)).days
+        except Exception:
+            return None  # unparseable/empty date — don't crash, don't flag as stalled
+
     if role in ("manager", "super_admin"):
-        # Stalled jobs
+        # Stalled jobs (guarded against malformed log dates)
         stalled = [j for j in db["jobs"].values()
                    if j.get("status") in ("In Progress", "Approved") and j.get("production_logs")
-                   and all((now - datetime.fromisoformat(l.get("date", today))).days > 3
-                            for l in j.get("production_logs", [])[-1:])]
+                   and (_last_log_age_days(j) or 0) > 3]
         if stalled:
             lines.append(f"\n⚠️ Stalled Jobs ({len(stalled)}):")
             for j in stalled[:5]:
@@ -3749,10 +4059,8 @@ async def send_digest(secret: str = "", current_user: dict = Depends(get_current
     sent = _send_email_or_log(db, current_user["email"], f"TruAgent Digest {today}", body, "system")
     return {"status": "ok", "digest": body, "email_status": sent}
 
-@app.get("/jobs/anomalies")
-async def jobs_anomalies(current_user: dict = Depends(get_manager_or_above)):
-    """I62: Anomaly scan — over-budget, stalled, past-due, approved-no-start."""
-    db = load_db()
+def _detect_anomalies(db: dict) -> list:
+    """I62: over-budget / stalled / past-due / approved-no-start / margin-drop flags."""
     now = datetime.now()
     flags = []
     financials = db.get("financials", {})
@@ -3796,7 +4104,43 @@ async def jobs_anomalies(current_user: dict = Depends(get_manager_or_above)):
             flags.append({"type": "margin_drop", "job_id": jid,
                           "client": job.get("client_name"),
                           "quoted": quoted, "live": live, "severity": "high"})
+    return flags
+
+
+@app.get("/jobs/anomalies")
+async def jobs_anomalies(current_user: dict = Depends(get_manager_or_above)):
+    """I62: Anomaly scan — over-budget, stalled, past-due, approved-no-start."""
+    db = load_db()
+    flags = _detect_anomalies(db)
     return {"status": "ok", "anomaly_flags": flags, "count": len(flags)}
+
+
+# ─── Scheduler task registry (F4) ────────────────────────────────────────────
+# Register the scan tasks the /cron/tick endpoint dispatches. Each persists its
+# result so the scan durably "surfaces" (O46/O51 COI/cert scans; I62 anomalies),
+# rather than only being computed on-demand by the dashboards.
+def _cron_compliance_scan():
+    db = load_db()
+    summary = _compliance_summary(db)
+    db["compliance_alerts"] = {**summary, "scanned_at": summary.get("checked_at")}
+    save_db(db)
+    return {"cois_flagged": len(summary.get("expiring_cois", [])),
+            "certs_flagged": len(summary.get("expiring_certs", [])),
+            "sds_gaps": len(summary.get("sds_gaps", []))}
+
+
+def _cron_anomaly_scan():
+    db = load_db()
+    flags = _detect_anomalies(db)
+    db["anomaly_snapshot"] = {"flags": flags, "scanned_at": datetime.now().isoformat()}
+    save_db(db)
+    return {"anomalies_flagged": len(flags)}
+
+
+_CRON_TASKS["compliance_scan"] = _cron_compliance_scan   # O52 rollup
+_CRON_TASKS["coi_scan"] = _cron_compliance_scan          # O46
+_CRON_TASKS["cert_scan"] = _cron_compliance_scan         # O51
+_CRON_TASKS["anomaly_scan"] = _cron_anomaly_scan         # I62
 
 
 if __name__ == "__main__":
