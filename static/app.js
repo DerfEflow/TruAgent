@@ -49,7 +49,12 @@ function showLogin() {
 function showDashboard() {
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('dashboard-screen').classList.remove('hidden');
-  
+
+  // Reset role-gated visibility first, so switching accounts in-place (logout →
+  // login without a page reload) can never leave a higher role's tabs showing.
+  document.querySelectorAll('.manager-only, .admin-only, .super-admin-only')
+    .forEach(el => el.classList.add('hidden'));
+
   const userEmail = localStorage.getItem('user_email') || 'User';
   document.getElementById('user-email').textContent = userEmail;
   
@@ -932,7 +937,8 @@ async function refreshProductionJobs() {
   try {
     const data = await apiCall('/jobs');
     sel.innerHTML = '<option value="">Select a job&hellip;</option>';
-    (data.jobs || []).forEach(j => {
+    // GET /jobs returns { jobs: { <id>: {...} } } (an object, not an array).
+    Object.values(data.jobs || {}).forEach(j => {
       const opt = document.createElement('option');
       opt.value = j.job_id;
       opt.textContent = `${j.job_id} — ${j.client_name || 'Unknown'}`;
@@ -948,13 +954,14 @@ async function loadProductionDashboard() {
   if (!jobId) { el.innerHTML = '<div class="empty-state"><p>Select a job above</p></div>'; return; }
   showLoading(true);
   try {
-    const [dash, gallons, coverage, margin, punch, qaReadings] = await Promise.allSettled([
+    // coverage + margin-alert are manager+ only; for field crew they reject and
+    // degrade gracefully (allSettled), so the production dashboard still renders.
+    const [dash, gallons, coverage, margin, punch] = await Promise.allSettled([
       apiCall(`/job/${jobId}/production-dashboard`),
       apiCall(`/job/${jobId}/gallons-tracker`),
       apiCall(`/job/${jobId}/coverage`),
       apiCall(`/job/${jobId}/margin-alert`),
       apiCall(`/job/${jobId}/punch-items`),
-      apiCall(`/job/${jobId}/qa-reading`).catch(() => ({ qa_readings: [] })),
     ]);
     const d = dash.value || {};
     const g = gallons.value || {};
@@ -1022,7 +1029,7 @@ async function checkWeather(jobId) {
   showLoading(true);
   try {
     const res = await apiCall(`/job/${jobId}/weather-check`, 'POST', {});
-    const color = res.verdict === 'GO' ? '#22c55e' : res.verdict === 'HOLD' ? '#ef4444' : '#f59e0b';
+    // Backend verdict vocabulary is GREEN / YELLOW / RED / UNKNOWN.
     alert(`Weather: ${res.verdict}\n${res.reason || ''}`);
     loadProductionDashboard();
   } catch (e) { alert('Weather check failed: ' + e.message); }
@@ -1136,7 +1143,7 @@ async function refreshSchedule() {
 
     // Weather verdicts bar
     if (vds.length) {
-      const verdictColor = { GO: '#22c55e', HOLD: '#ef4444', CAUTION: '#f59e0b', UNKNOWN: '#6b7280' };
+      const verdictColor = { GREEN: '#22c55e', YELLOW: '#f59e0b', RED: '#ef4444', UNKNOWN: '#6b7280' };
       weatherEl.innerHTML = `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem">
         ${vds.map(v => `<span style="background:${verdictColor[v.verdict] || '#6b7280'};color:#fff;padding:4px 10px;border-radius:999px;font-size:.8rem">
           ${v.client || v.job_id}: ${v.verdict}</span>`).join('')}
@@ -1196,7 +1203,7 @@ async function refreshCompliance() {
   try {
     const data = await apiCall('/compliance/dashboard');
     const expCOIs = (data.expiring_cois || []);
-    const expCerts = (data.expiring_employee_certs || []);
+    const expCerts = (data.expiring_certs || []);
     const uncleared = (data.uncleared_parties || []);
     const sdsGaps = (data.sds_gaps || []);
 
@@ -1224,6 +1231,13 @@ async function refreshCompliance() {
         <table class="financial-table"><thead><tr><th>Party</th><th>Expiry</th><th>Days</th></tr></thead>
         <tbody>${expCOIs.slice(0, 10).map(c =>
           `<tr><td>${c.name || c.party_id}</td><td>${c.expiry || 'Missing'}</td>
+           <td style="color:${c.days_until_expiry < 30 ? '#ef4444' : '#f59e0b'}">${c.days_until_expiry != null ? c.days_until_expiry : '—'}</td></tr>`).join('')}
+        </tbody></table>` : ''}
+      ${expCerts.length ? `
+        <h4>Expiring Employee Certs</h4>
+        <table class="financial-table"><thead><tr><th>Employee</th><th>Cert</th><th>Expiry</th><th>Days</th></tr></thead>
+        <tbody>${expCerts.slice(0, 10).map(c =>
+          `<tr><td>${c.name || c.employee_id}</td><td>${(c.cert_type || '').replace(/_/g,' ')}</td><td>${c.expiry || 'Missing'}</td>
            <td style="color:${c.days_until_expiry < 30 ? '#ef4444' : '#f59e0b'}">${c.days_until_expiry != null ? c.days_until_expiry : '—'}</td></tr>`).join('')}
         </tbody></table>` : ''}
       ${uncleared.length ? `
