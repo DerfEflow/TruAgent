@@ -13,6 +13,20 @@ function isUser() {
   return userRole === 'user';
 }
 
+async function apiCall(path, method = 'GET', body = null) {
+  const opts = { method, headers: { 'Authorization': `Bearer ${token}` } };
+  if (body !== null) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/static/service-worker.js')
     .then(() => console.log('Service Worker registered'))
@@ -907,3 +921,338 @@ function displayFinancialReport(data) {
   
   contentDiv.innerHTML = html;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRODUCTION TAB  (F2, P21–P29)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function refreshProductionJobs() {
+  const sel = document.getElementById('prod-job-select');
+  const currentVal = sel.value;
+  try {
+    const data = await apiCall('/jobs');
+    sel.innerHTML = '<option value="">Select a job&hellip;</option>';
+    (data.jobs || []).forEach(j => {
+      const opt = document.createElement('option');
+      opt.value = j.job_id;
+      opt.textContent = `${j.job_id} — ${j.client_name || 'Unknown'}`;
+      if (j.job_id === currentVal) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  } catch (e) { console.error('refreshProductionJobs', e); }
+}
+
+async function loadProductionDashboard() {
+  const jobId = document.getElementById('prod-job-select').value;
+  const el = document.getElementById('production-content');
+  if (!jobId) { el.innerHTML = '<div class="empty-state"><p>Select a job above</p></div>'; return; }
+  showLoading(true);
+  try {
+    const [dash, gallons, coverage, margin, punch, qaReadings] = await Promise.allSettled([
+      apiCall(`/job/${jobId}/production-dashboard`),
+      apiCall(`/job/${jobId}/gallons-tracker`),
+      apiCall(`/job/${jobId}/coverage`),
+      apiCall(`/job/${jobId}/margin-alert`),
+      apiCall(`/job/${jobId}/punch-items`),
+      apiCall(`/job/${jobId}/qa-reading`).catch(() => ({ qa_readings: [] })),
+    ]);
+    const d = dash.value || {};
+    const g = gallons.value || {};
+    const cov = coverage.value || {};
+    const mar = margin.value || {};
+    const punches = (punch.value || {}).punch_items || [];
+
+    const healthColor = { good: '#22c55e', warning: '#f59e0b', alert: '#ef4444' };
+    const badge = d.health_badge || 'good';
+
+    let gallonRows = '';
+    for (const [prod, info] of Object.entries(g.gallons || {})) {
+      const pct = info.pct_consumed != null ? info.pct_consumed.toFixed(1) + '%' : 'N/A';
+      const over = info.overrun ? ' style="color:#ef4444;font-weight:600"' : '';
+      gallonRows += `<tr${over}><td>${prod}</td><td>${info.estimated}</td><td>${info.applied}</td><td>${pct}</td></tr>`;
+    }
+
+    const openPunch = punches.filter(p => p.status !== 'done');
+    const punchRows = openPunch.map(p =>
+      `<li class="punch-item">${p.description}${p.area ? ` <span class="help-text">(${p.area})</span>` : ''}
+        <button onclick="closePunchItem('${jobId}', '${p.id}')" class="btn-secondary" style="padding:2px 8px;font-size:0.75rem;margin-left:8px;">Done</button>
+      </li>`
+    ).join('');
+
+    el.innerHTML = `
+      <div class="prod-dashboard">
+        <div class="prod-header">
+          <span class="health-badge" style="background:${healthColor[badge] || '#6b7280'};color:#fff;padding:3px 10px;border-radius:999px;font-size:0.8rem;text-transform:uppercase">${badge}</span>
+          <h3 style="margin:0">${d.client || jobId}</h3>
+          <span class="help-text">${d.last_log_date ? 'Last log: ' + d.last_log_date : 'No logs yet'}</span>
+        </div>
+        <div class="summary-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;margin:1rem 0">
+          <div class="summary-card"><div class="summary-label">% Complete</div><div class="summary-value">${(d.pct_complete || 0).toFixed(1)}%</div></div>
+          <div class="summary-card"><div class="summary-label">Sqft Coated</div><div class="summary-value">${(d.total_sqft_coated || 0).toLocaleString()}</div><div class="summary-detail">of ${(d.sqft_target || 0).toLocaleString()}</div></div>
+          <div class="summary-card"><div class="summary-label">Achieved Mil</div><div class="summary-value">${cov.achieved_dry_mil != null ? cov.achieved_dry_mil : '—'}</div><div class="summary-detail">target ${cov.target_dry_mil || '—'}</div></div>
+          <div class="summary-card ${mar.alerts && mar.alerts.length ? 'negative' : ''}"><div class="summary-label">Margin Alerts</div><div class="summary-value">${(mar.alerts || []).length}</div></div>
+          <div class="summary-card"><div class="summary-label">QA Flags</div><div class="summary-value">${d.qa_flag_count || 0}</div></div>
+          <div class="summary-card"><div class="summary-label">Open Punch</div><div class="summary-value">${d.open_punch_items || 0}</div></div>
+        </div>
+        ${gallonRows ? `
+          <h4>Gallons Tracker</h4>
+          <table class="financial-table"><thead><tr><th>Product</th><th>Estimated</th><th>Applied</th><th>% Used</th></tr></thead>
+          <tbody>${gallonRows}</tbody></table>` : ''}
+        ${mar.alerts && mar.alerts.length ? `<div class="error-message" style="margin:1rem 0">${mar.alerts.join('<br>')}</div>` : ''}
+        ${openPunch.length ? `<h4>Open Punch Items (${openPunch.length})</h4><ul class="punch-list" style="padding-left:1rem">${punchRows}</ul>` : ''}
+        <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
+          <button onclick="showAddPunchModal('${jobId}')" class="btn-secondary">+ Punch Item</button>
+          <button onclick="checkWeather('${jobId}')" class="btn-secondary">Weather Check</button>
+          <button onclick="showQAModal('${jobId}')" class="btn-secondary">+ QA Reading</button>
+        </div>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Failed to load production data: ${e.message}</p>`;
+  } finally { showLoading(false); }
+}
+
+async function closePunchItem(jobId, itemId) {
+  try {
+    await apiCall(`/job/${jobId}/punch-items/${itemId}`, 'PUT', { status: 'done' });
+    loadProductionDashboard();
+  } catch (e) { alert('Failed to close punch item: ' + e.message); }
+}
+
+async function checkWeather(jobId) {
+  showLoading(true);
+  try {
+    const res = await apiCall(`/job/${jobId}/weather-check`, 'POST', {});
+    const color = res.verdict === 'GO' ? '#22c55e' : res.verdict === 'HOLD' ? '#ef4444' : '#f59e0b';
+    alert(`Weather: ${res.verdict}\n${res.reason || ''}`);
+    loadProductionDashboard();
+  } catch (e) { alert('Weather check failed: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+function showQAModal(jobId) {
+  const product = prompt('Product/system (e.g. silicone):');
+  if (!product) return;
+  const wetMilStr = prompt('Wet-mil readings (comma-separated, e.g. 20,21,19):');
+  if (!wetMilStr) return;
+  const wetMil = wetMilStr.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+  const coat = prompt('Coat number (1, 2, etc.):') || '1';
+  apiCall(`/job/${jobId}/qa-reading`, 'POST', {
+    product, wet_mil: wetMil, coat_seq: parseInt(coat), area: ''
+  }).then(() => { alert('QA reading saved'); loadProductionDashboard(); })
+    .catch(e => alert('Failed: ' + e.message));
+}
+
+function showAddPunchModal(jobId) {
+  const desc = prompt('Describe the punch item:');
+  if (!desc) return;
+  const area = prompt('Area (optional):') || '';
+  apiCall(`/job/${jobId}/punch-items`, 'POST', { description: desc, area }).then(() => {
+    alert('Punch item added');
+    loadProductionDashboard();
+  }).catch(e => alert('Failed: ' + e.message));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PIPELINE TAB  (S30–S38)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PIPELINE_STAGES = ['New Lead', 'Site Survey', 'Measured/Cores', 'Estimating', 'Proposal', 'Negotiation', 'Won', 'Lost'];
+
+async function refreshPipeline() {
+  const el = document.getElementById('pipeline-content');
+  showLoading(true);
+  try {
+    const [pipe, renewals, winLoss] = await Promise.allSettled([
+      apiCall('/pipeline'),
+      apiCall('/renewals'),
+      apiCall('/sales/win-loss'),
+    ]);
+    const stages = (pipe.value || {}).pipeline || {};
+    const ren = (renewals.value || {}).renewals || [];
+    const wl = winLoss.value || {};
+
+    let html = `<div class="pipeline-summary" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem">
+      <div class="summary-card"><div class="summary-label">Win Rate</div><div class="summary-value">${wl.win_rate_pct || 0}%</div><div class="summary-detail">${wl.wins || 0}W / ${wl.losses || 0}L</div></div>
+    </div>
+    <div class="kanban" style="display:flex;gap:.75rem;overflow-x:auto;padding-bottom:.5rem">`;
+
+    for (const stage of PIPELINE_STAGES) {
+      const opps = stages[stage] || [];
+      html += `<div class="kanban-col" style="min-width:180px;background:#1e293b;border-radius:8px;padding:.75rem">
+        <div style="font-weight:600;font-size:.85rem;margin-bottom:.5rem;color:#94a3b8">${stage} (${opps.length})</div>
+        ${opps.map(o => `
+          <div class="kanban-card" style="background:#0f172a;border-radius:6px;padding:.5rem;margin-bottom:.5rem;font-size:.82rem">
+            <div style="font-weight:600">${o.client_name || 'Unknown'}</div>
+            <div class="help-text">${o.address || ''}</div>
+            <div style="margin-top:.35rem;display:flex;gap:.25rem;flex-wrap:wrap">
+              ${PIPELINE_STAGES.filter(s => s !== stage && s !== 'Lost').map(s =>
+                `<button onclick="moveOpp('${o.id}','${s}')" style="font-size:.7rem;padding:1px 5px" class="btn-secondary">${s.split(' ')[0]}</button>`
+              ).join('')}
+            </div>
+          </div>`).join('')}
+        </div>`;
+    }
+    html += '</div>';
+    el.innerHTML = html;
+
+    const renEl = document.getElementById('renewals-content');
+    if (ren.length) {
+      renEl.innerHTML = `<table class="financial-table"><thead><tr><th>Client</th><th>Address</th><th>System</th><th>Due</th><th>Days</th></tr></thead><tbody>
+        ${ren.slice(0, 10).map(r => `<tr><td>${r.client || ''}</td><td>${r.address || ''}</td><td>${r.system || ''}</td><td>${r.renewal_due || ''}</td><td style="color:${r.days_until_due < 90 ? '#ef4444' : '#22c55e'}">${r.days_until_due}</td></tr>`).join('')}
+      </tbody></table>`;
+    } else {
+      renEl.innerHTML = '<p class="help-text">No renewals due.</p>';
+    }
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Failed to load pipeline: ${e.message}</p>`;
+  } finally { showLoading(false); }
+}
+
+async function moveOpp(oppId, stage) {
+  try {
+    await apiCall(`/pipeline/${oppId}/stage`, 'PUT', { stage, notes: '' });
+    refreshPipeline();
+  } catch (e) { alert('Failed to move opportunity: ' + e.message); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULE TAB  (C39–C45)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function refreshSchedule() {
+  const el = document.getElementById('schedule-content');
+  const weatherEl = document.getElementById('weather-verdicts-bar');
+  showLoading(true);
+  try {
+    const [assignments, verdicts, anomalies] = await Promise.allSettled([
+      apiCall('/schedule/assignments'),
+      apiCall('/schedule/weather-verdicts'),
+      apiCall('/jobs/anomalies'),
+    ]);
+
+    const asgns = (assignments.value || {}).assignments || [];
+    const vds = (verdicts.value || {}).scheduled_jobs || [];
+    const flags = (anomalies.value || {}).anomaly_flags || [];
+
+    // Weather verdicts bar
+    if (vds.length) {
+      const verdictColor = { GO: '#22c55e', HOLD: '#ef4444', CAUTION: '#f59e0b', UNKNOWN: '#6b7280' };
+      weatherEl.innerHTML = `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem">
+        ${vds.map(v => `<span style="background:${verdictColor[v.verdict] || '#6b7280'};color:#fff;padding:4px 10px;border-radius:999px;font-size:.8rem">
+          ${v.client || v.job_id}: ${v.verdict}</span>`).join('')}
+      </div>`;
+    } else {
+      weatherEl.innerHTML = '';
+    }
+
+    // Anomaly flags
+    let anomalyHtml = '';
+    if (flags.length) {
+      anomalyHtml = `<div class="error-message" style="margin-bottom:1rem">
+        <strong>${flags.length} anomaly flag(s):</strong>
+        <ul style="margin:.25rem 0 0 1rem;padding:0">
+          ${flags.slice(0, 5).map(f => `<li>${f.type.replace(/_/g,' ')} — ${f.client || f.job_id}</li>`).join('')}
+        </ul>
+      </div>`;
+    }
+
+    // Grouped by date
+    const byDate = {};
+    asgns.forEach(a => {
+      const d = a.date || 'No date';
+      (byDate[d] = byDate[d] || []).push(a);
+    });
+
+    let html = anomalyHtml;
+    if (!Object.keys(byDate).length) {
+      html += '<div class="empty-state"><p>No assignments scheduled</p></div>';
+    } else {
+      Object.keys(byDate).sort().forEach(date => {
+        html += `<div style="margin-bottom:1rem"><h4 style="margin:0 0 .5rem">${date}</h4>
+          <table class="financial-table"><thead><tr><th>Job</th><th>Client</th><th>Crew</th><th>Phase</th><th>Weather</th></tr></thead><tbody>
+          ${byDate[date].map(a => `<tr>
+            <td>${a.job_id}</td>
+            <td>${a.client || ''}</td>
+            <td>${a.crew || ''}</td>
+            <td>${a.phase || ''}</td>
+            <td>${(a.weather_status || {}).verdict || '?'}</td>
+          </tr>`).join('')}
+          </tbody></table></div>`;
+      });
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Failed to load schedule: ${e.message}</p>`;
+  } finally { showLoading(false); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPLIANCE TAB  (O46–O56)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function refreshCompliance() {
+  const el = document.getElementById('compliance-content');
+  showLoading(true);
+  try {
+    const data = await apiCall('/compliance/dashboard');
+    const expCOIs = (data.expiring_cois || []);
+    const expCerts = (data.expiring_employee_certs || []);
+    const uncleared = (data.uncleared_parties || []);
+    const sdsGaps = (data.sds_gaps || []);
+
+    el.innerHTML = `
+      <div class="summary-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin-bottom:1.5rem">
+        <div class="summary-card ${expCOIs.length ? 'negative' : ''}">
+          <div class="summary-label">Expiring COIs</div>
+          <div class="summary-value">${expCOIs.length}</div>
+        </div>
+        <div class="summary-card ${expCerts.length ? 'negative' : ''}">
+          <div class="summary-label">Expiring Certs</div>
+          <div class="summary-value">${expCerts.length}</div>
+        </div>
+        <div class="summary-card ${uncleared.length ? 'negative' : ''}">
+          <div class="summary-label">Uncleared Subs</div>
+          <div class="summary-value">${uncleared.length}</div>
+        </div>
+        <div class="summary-card ${sdsGaps.length ? 'negative' : ''}">
+          <div class="summary-label">SDS Gaps</div>
+          <div class="summary-value">${sdsGaps.length}</div>
+        </div>
+      </div>
+      ${expCOIs.length ? `
+        <h4>Expiring / Missing COIs</h4>
+        <table class="financial-table"><thead><tr><th>Party</th><th>Expiry</th><th>Days</th></tr></thead>
+        <tbody>${expCOIs.slice(0, 10).map(c =>
+          `<tr><td>${c.name || c.party_id}</td><td>${c.expiry || 'Missing'}</td>
+           <td style="color:${c.days_until_expiry < 30 ? '#ef4444' : '#f59e0b'}">${c.days_until_expiry != null ? c.days_until_expiry : '—'}</td></tr>`).join('')}
+        </tbody></table>` : ''}
+      ${uncleared.length ? `
+        <h4>Uncleared Subs/Vendors</h4>
+        <ul style="padding-left:1rem">${uncleared.slice(0, 10).map(p => `<li>${p.name}</li>`).join('')}</ul>` : ''}
+      ${sdsGaps.length ? `
+        <h4>Products Missing SDS</h4>
+        <ul style="padding-left:1rem">${sdsGaps.slice(0, 10).map(p => `<li>${p}</li>`).join('')}</ul>` : ''}
+      ${!expCOIs.length && !uncleared.length && !sdsGaps.length && !expCerts.length
+        ? '<div class="empty-state"><p style="color:#22c55e">All clear — no compliance gaps</p></div>' : ''}`;
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Failed to load compliance data: ${e.message}</p>`;
+  } finally { showLoading(false); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab init hooks — load data when switching to new tabs
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _tabInitializers = {
+  production: () => refreshProductionJobs(),
+  pipeline: () => refreshPipeline(),
+  schedule: () => refreshSchedule(),
+  compliance: () => refreshCompliance(),
+};
+
+// Patch showTab to call initializers
+const _origShowTab = showTab;
+window.showTab = function(tabName, btn) {
+  _origShowTab(tabName, btn);
+  if (_tabInitializers[tabName]) _tabInitializers[tabName]();
+};

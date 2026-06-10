@@ -41,8 +41,12 @@
     <nav class="tabs">
       <button class="tab active" onclick="showTab('ai-agent', this)">AI Agent</button>
       <button class="tab" onclick="showTab('jobs', this)">Jobs</button>
+      <button class="tab" onclick="showTab('production', this)">Production</button>
+      <button class="tab manager-only hidden" onclick="showTab('pipeline', this)">Pipeline</button>
+      <button class="tab manager-only hidden" onclick="showTab('schedule', this)">Schedule</button>
       <button class="tab" onclick="showTab('documents', this)">Documents</button>
       <button class="tab manager-only hidden" onclick="showTab('financials', this)">Financials</button>
+      <button class="tab manager-only hidden" onclick="showTab('compliance', this)">Compliance</button>
       <button class="tab admin-only hidden" onclick="showTab('admin', this)">Admin</button>
     </nav>
 
@@ -86,6 +90,59 @@
         </div>
       </div>
 
+      <!-- PRODUCTION TAB -->
+      <div id="production-tab" class="tab-content">
+        <div class="section-header">
+          <h2>Production</h2>
+          <div class="header-controls">
+            <select id="prod-job-select" onchange="loadProductionDashboard()">
+              <option value="">Select a job&hellip;</option>
+            </select>
+            <button onclick="refreshProductionJobs()" class="btn-secondary">Refresh</button>
+          </div>
+        </div>
+        <div id="production-content">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>Select a job to view production dashboard</p>
+            <span>QA readings, coat progress, punch list, and weather</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PIPELINE TAB -->
+      <div id="pipeline-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Sales Pipeline</h2>
+          <button onclick="refreshPipeline()" class="btn-secondary">Refresh</button>
+        </div>
+        <div id="pipeline-content">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>Loading pipeline&hellip;</p>
+          </div>
+        </div>
+        <div class="section-header" style="margin-top:2rem;">
+          <h3>Renewals Due</h3>
+        </div>
+        <div id="renewals-content"></div>
+      </div>
+
+      <!-- SCHEDULE TAB -->
+      <div id="schedule-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Schedule</h2>
+          <button onclick="refreshSchedule()" class="btn-secondary">Refresh</button>
+        </div>
+        <div id="weather-verdicts-bar"></div>
+        <div id="schedule-content">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>Loading schedule&hellip;</p>
+          </div>
+        </div>
+      </div>
+
       <!-- DOCUMENTS TAB -->
       <div id="documents-tab" class="tab-content">
         <div class="section-header">
@@ -119,6 +176,20 @@
             <div class="empty-icon">&#9636;</div>
             <p>Select a job to view profitability</p>
             <span>Revenue, costs, and margin will appear here</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- COMPLIANCE TAB -->
+      <div id="compliance-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Compliance</h2>
+          <button onclick="refreshCompliance()" class="btn-secondary">Refresh</button>
+        </div>
+        <div id="compliance-content">
+          <div class="empty-state">
+            <div class="empty-icon">&#9634;</div>
+            <p>Loading compliance dashboard&hellip;</p>
           </div>
         </div>
       </div>

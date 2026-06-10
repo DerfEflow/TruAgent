@@ -55,6 +55,14 @@ QUICKBOOKS_SECRET = os.getenv("QUICKBOOKS_SECRET", "change_this_in_production")
 EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")
 SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
 
+# Inbound webhook secrets for the three sibling-app doors (F1/F2/F3) and the
+# scheduler endpoint (F4). Each is validated server-side on every request.
+ALPHA_SECRET = os.getenv("ALPHA_SECRET", "change_alpha_secret_in_production")
+PRODUCTION_SECRET = os.getenv("PRODUCTION_SECRET", "change_production_secret_in_production")
+LEADS_SECRET = os.getenv("LEADS_SECRET", "change_leads_secret_in_production")
+CRON_SECRET = os.getenv("CRON_SECRET", "change_cron_secret_in_production")
+ESIGN_WEBHOOK_URL = os.getenv("ESIGN_WEBHOOK_URL", "")
+
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is the id confirmed working on this account; a known-good fallback is
 # used automatically if the primary id is rejected (see _create_completion).
@@ -71,6 +79,60 @@ DATA_DIR = os.getenv("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 db_file = os.path.join(DATA_DIR, "db.json")
 DOCUMENTS_DIR = os.path.join(DATA_DIR, "documents")
+PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
+
+# ─── Specs-corpus constants ───────────────────────────────────────────────────
+# Volume-solids per coating chemistry — scraped from manufacturer specs.
+# Dry-mil ≈ gallons_applied × 1604 × volume_solids ÷ sqft_coated.
+# Silicones run 90–96%; water-based acrylics ~45–55%. Never use a single constant.
+_VOLUME_SOLIDS = {
+    "silicone": 0.93, "acrylic": 0.50, "urethane": 0.80,
+    "elastomeric": 0.55, "butyl": 0.70, "asphaltic": 0.60, "hybrid": 0.70,
+}
+_DEFAULT_VS = 0.65
+
+# Weather profiles seeded from specs corpus.
+# min_cure_before_rain_hrs = first-class field; this is the spec line that voids
+# acrylic/urethane warranties (where silicones are far more forgiving).
+_DEFAULT_WEATHER_PROFILES = {
+    "silicone": {
+        "temp_min": 40, "temp_max": 120, "surface_min": 35, "surface_max": 175,
+        "rh_max": 90, "surface_minus_dewpoint": 5, "rain_free_hrs_apply": 0.5,
+        "min_cure_before_rain_hrs": 2, "inter_coat_window_hrs": 24,
+    },
+    "acrylic": {
+        "temp_min": 50, "temp_max": 95, "surface_min": 50, "surface_max": 150,
+        "rh_max": 85, "surface_minus_dewpoint": 5, "rain_free_hrs_apply": 2,
+        "min_cure_before_rain_hrs": 24, "inter_coat_window_hrs": 4,
+    },
+    "urethane": {
+        "temp_min": 40, "temp_max": 100, "surface_min": 40, "surface_max": 150,
+        "rh_max": 85, "surface_minus_dewpoint": 5, "rain_free_hrs_apply": 1,
+        "min_cure_before_rain_hrs": 8, "inter_coat_window_hrs": 8,
+    },
+    "elastomeric": {
+        "temp_min": 45, "temp_max": 100, "surface_min": 45, "surface_max": 155,
+        "rh_max": 85, "surface_minus_dewpoint": 5, "rain_free_hrs_apply": 2,
+        "min_cure_before_rain_hrs": 12, "inter_coat_window_hrs": 6,
+    },
+    "butyl": {
+        "temp_min": 35, "temp_max": 110, "surface_min": 35, "surface_max": 165,
+        "rh_max": 80, "surface_minus_dewpoint": 5, "rain_free_hrs_apply": 1,
+        "min_cure_before_rain_hrs": 6, "inter_coat_window_hrs": 12,
+    },
+}
+
+# Substrate prep items required by substrate type (P22)
+_PREP_ITEMS_BY_SUBSTRATE = {
+    "metal":    ["clean", "rust_treatment", "primer", "seams_sealed", "fasteners_tight"],
+    "tpo":      ["clean", "seams_sealed", "membrane_inspection"],
+    "epdm":     ["clean", "seams_sealed", "primer"],
+    "bur":      ["clean", "blisters_cut", "felts_dried", "flashings_checked"],
+    "modified": ["clean", "blisters_cut", "seams_sealed", "flashings_checked"],
+    "concrete": ["clean", "cracks_filled", "primer", "ponding_addressed"],
+    "foam":     ["clean", "inspection", "bare_foam_primed"],
+    "default":  ["clean", "ponding_addressed", "seams_sealed", "primer"],
+}
 
 def load_db():
     if os.path.exists(db_file):
@@ -78,11 +140,7 @@ def load_db():
             db = json.load(f)
         
         needs_migration = False
-        
-        if "financials" not in db:
-            db["financials"] = {}
-            needs_migration = True
-        
+
         for email, user_data in db.get("users", {}).items():
             if "is_admin" in user_data and "role" not in user_data:
                 if user_data["is_admin"]:
@@ -95,16 +153,43 @@ def load_db():
                 del user_data["is_admin"]
                 needs_migration = True
         
+        for _key in ("weather_profiles", "templates", "sds", "employees",
+                     "parties", "opportunities", "equipment", "doc_chunks"):
+            if _key not in db:
+                db[_key] = {}
+                needs_migration = True
+        if "cron_log" not in db:
+            db["cron_log"] = []
+            needs_migration = True
+        if not db.get("weather_profiles"):
+            db["weather_profiles"] = {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()}
+            needs_migration = True
+        if "financials" not in db:
+            db["financials"] = {}
+        if "invoices" not in db.get("financials", {}):
+            db.setdefault("financials", {})["invoices"] = {}
+        if "expenses" not in db.get("financials", {}):
+            db.setdefault("financials", {})["expenses"] = {}
+
         if needs_migration:
             save_db(db)
-        
+
         return db
-    
+
     return {
         "jobs": {},
         "documents": {},
         "chat_history": {},
-        "financials": {},
+        "financials": {"invoices": {}, "expenses": {}},
+        "weather_profiles": {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()},
+        "templates": {},
+        "sds": {},
+        "employees": {},
+        "parties": {},
+        "opportunities": {},
+        "equipment": {},
+        "doc_chunks": {},
+        "cron_log": [],
         "users": {
             "fred@trulineroofing.com": {
                 "email": "fred@trulineroofing.com",
@@ -248,6 +333,224 @@ class EmailMessage(BaseModel):
 class SMSMessage(BaseModel):
     to: str
     message: str
+
+# ─── New models (F1–I63) ─────────────────────────────────────────────────────
+
+class AlphaWebhook(BaseModel):
+    secret: str
+    job_id: str
+    client_name: Optional[str] = None
+    address: Optional[str] = None
+    contract_value: Optional[float] = None
+    coating_system: Optional[str] = None
+    substrate: Optional[str] = None
+    sqft: Optional[float] = None
+    dry_mil_target: Optional[float] = None
+    quoted_margin: Optional[float] = None
+    loaded_labor_rate: Optional[float] = None
+    est_gallons: Optional[Dict[str, float]] = None       # {"product_name": gallons}
+    material_cost_per_gal: Optional[Dict[str, float]] = None
+    labor_hours_by_method: Optional[Dict[str, float]] = None
+    data: Optional[dict] = None
+
+class ProductionLogWebhook(BaseModel):
+    secret: str
+    job_id: str
+    date: str
+    crew: Optional[str] = None
+    product: Optional[str] = None
+    gallons_applied: Optional[float] = None
+    gallons_by_product: Optional[Dict[str, float]] = None
+    sqft_coated: Optional[float] = None
+    wet_mil: Optional[List[float]] = None
+    hours_by_type: Optional[Dict[str, float]] = None    # {"spray": h, "prep": h, "roller": h}
+    weather: Optional[dict] = None
+    photo_refs: Optional[List[str]] = None
+    notes: Optional[str] = None
+    coat_seq: Optional[int] = None
+
+class LeadWebhook(BaseModel):
+    secret: str
+    source: Optional[str] = None
+    client_name: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    rep: Optional[str] = None
+    data: Optional[dict] = None
+
+class ChangeOrderRequest(BaseModel):
+    reason: str
+    added_gallons: Optional[float] = 0
+    added_hours: Optional[float] = 0
+    price: Optional[float] = 0
+    approved_by: Optional[str] = None
+
+class DrawRequest(BaseModel):
+    description: str
+    amount: float
+    milestone: Optional[str] = None
+    retainage_pct: Optional[float] = 10.0
+
+class WeatherCheckRequest(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    coating_system: Optional[str] = None
+
+class PrepSignoffRequest(BaseModel):
+    substrate: Optional[str] = "default"
+    area: Optional[str] = None
+    items: Dict[str, bool]   # {"clean": True, "primer": True, ...}
+    notes: Optional[str] = None
+
+class QAReadingRequest(BaseModel):
+    product: str
+    coat_seq: Optional[int] = 1
+    area: Optional[str] = None
+    wet_mil: Optional[List[float]] = None
+    notes: Optional[str] = None
+
+class CoatLogRequest(BaseModel):
+    product: str
+    coat_seq: int
+    wet_mil: Optional[float] = None
+    sqft_coated: Optional[float] = None
+    notes: Optional[str] = None
+
+class PunchItemRequest(BaseModel):
+    description: str
+    area: Optional[str] = None
+    assignee: Optional[str] = None
+    photo_ref: Optional[str] = None
+
+class PunchItemUpdate(BaseModel):
+    status: str   # open | in_progress | done
+    notes: Optional[str] = None
+
+class WarrantyRequest(BaseModel):
+    manufacturer: Optional[str] = None
+    warranty_type: Optional[str] = None
+    term_years: Optional[int] = None
+    required_mil: Optional[float] = None
+    install_date: Optional[str] = None
+    registration_deadline: Optional[str] = None
+    cert_number: Optional[str] = None
+    registered: Optional[bool] = False
+    renewal_recoat_due: Optional[str] = None
+
+class PipelineStageUpdate(BaseModel):
+    stage: str
+    notes: Optional[str] = None
+
+class WinLossRequest(BaseModel):
+    outcome: str    # "won" | "lost"
+    loss_reason: Optional[str] = None   # price | tear_off | competitor | saturated | warranty_short | weather
+    notes: Optional[str] = None
+    contract_value: Optional[float] = None
+
+class ESignRequest(BaseModel):
+    document_id: Optional[str] = None
+    recipient_email: str
+    recipient_name: Optional[str] = None
+    document_type: str = "proposal"
+    message: Optional[str] = None
+
+class TimelogRequest(BaseModel):
+    employee: str
+    arrive: str
+    depart: Optional[str] = None
+    geo: Optional[dict] = None
+    hours_type: Optional[str] = "general"   # spray | prep | roller | general
+
+class PartyRequest(BaseModel):
+    name: str
+    party_type: str = "sub"   # sub | vendor
+    trade: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+
+class COIRequest(BaseModel):
+    party_id: str
+    carrier: str
+    policy_number: Optional[str] = None
+    expiry: str   # ISO date string
+    gl_limit: Optional[float] = None
+    wc_limit: Optional[float] = None
+    document_id: Optional[str] = None
+
+class TemplateRequest(BaseModel):
+    name: str
+    kind: str   # subcontract | proposal | warranty | lien_waiver | jha | dispatch
+    body: str   # may contain {{merge_tokens}}
+
+class SDSRequest(BaseModel):
+    product: str
+    manufacturer: Optional[str] = None
+    document_id: Optional[str] = None
+    url: Optional[str] = None
+    notes: Optional[str] = None
+
+class EmployeeRequest(BaseModel):
+    name: str
+    email: Optional[str] = None
+    role: Optional[str] = "crew"
+
+class CertRequest(BaseModel):
+    cert_type: str   # osha10 | osha30 | fall_protection | respirator_fit | lift | applicator | other
+    expiry: Optional[str] = None
+    notes: Optional[str] = None
+
+class LienWaiverRequest(BaseModel):
+    waiver_type: str   # conditional_progress | unconditional_progress | conditional_final | unconditional_final
+    through_date: Optional[str] = None
+    payment_amount: Optional[float] = None
+    claimant_name: Optional[str] = None
+
+class ContactLogRequest(BaseModel):
+    contact_type: str   # email | sms | call | visit | note
+    summary: str
+    contact_with: Optional[str] = None
+    direction: Optional[str] = "outbound"
+
+class PermitRequest(BaseModel):
+    permit_type: Optional[str] = "roofing"
+    permit_number: Optional[str] = None
+    status: str = "pending"   # pending | applied | issued | not_required
+    jurisdiction: Optional[str] = None
+    issued_date: Optional[str] = None
+
+class JHARequest(BaseModel):
+    coating_system: Optional[str] = None
+    hazards: Optional[List[str]] = None
+    controls: Optional[List[str]] = None
+    ppe_required: Optional[List[str]] = None
+
+class AssignmentRequest(BaseModel):
+    job_id: str
+    crew: str
+    date: str   # YYYY-MM-DD
+    phase: Optional[str] = None
+    notes: Optional[str] = None
+
+class EquipmentRequest(BaseModel):
+    name: str
+    equipment_type: str   # sprayer | lift | truck | trailer | other
+    day_rate: Optional[float] = None
+    notes: Optional[str] = None
+
+class DispatchRequest(BaseModel):
+    date: str
+    crew: Optional[str] = None
+    job_ids: Optional[List[str]] = None
+
+class VoiceReportRequest(BaseModel):
+    transcript: str
+    job_id: Optional[str] = None
+
+class ReviewRequest(BaseModel):
+    platform: Optional[str] = "google"
+    message: Optional[str] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Agent operations — shared by the /chat AI agent (tool-calling) and the explicit
@@ -415,6 +718,271 @@ def _compact_job(job: dict) -> dict:
         "address", "assigned_to") if job.get(k) not in (None, "")}
 
 
+# ─── Coating / production helpers ────────────────────────────────────────────
+
+def _get_volume_solids(system: str) -> float:
+    if not system:
+        return _DEFAULT_VS
+    return _VOLUME_SOLIDS.get(system.lower().strip(), _DEFAULT_VS)
+
+
+def _calc_achieved_dry_mil(gallons_applied: float, sqft: float, volume_solids: float) -> float:
+    if sqft <= 0 or gallons_applied <= 0:
+        return 0.0
+    return round(gallons_applied * 1604.0 * volume_solids / sqft, 2)
+
+
+def _production_pct_complete(job: dict) -> float:
+    """Estimate % complete from sqft_coated vs. sqft in budget."""
+    sqft_target = (job.get("budget") or {}).get("sqft", 0) or 0
+    if sqft_target <= 0:
+        return 0.0
+    sqft_done = sum(
+        float(log.get("sqft_coated") or 0)
+        for log in job.get("production_logs") or []
+    )
+    return round(min(sqft_done / sqft_target * 100, 100), 1)
+
+
+def _applied_gallons_by_product(job: dict) -> dict:
+    """Aggregate applied gallons per product across all production logs."""
+    totals: Dict[str, float] = {}
+    for log in job.get("production_logs") or []:
+        gbp = log.get("gallons_by_product") or {}
+        if gbp:
+            for prod, gals in gbp.items():
+                totals[prod] = totals.get(prod, 0.0) + float(gals or 0)
+        elif log.get("product") and log.get("gallons_applied"):
+            prod = log["product"]
+            totals[prod] = totals.get(prod, 0.0) + float(log["gallons_applied"])
+    return totals
+
+
+def _job_margin_live(db: dict, job: dict) -> Optional[float]:
+    """Current live margin % for a job (requires financials)."""
+    financials = db.get("financials") or {}
+    inv_map = financials.get("invoices", {})
+    exp_map = financials.get("expenses", {})
+    invoices = [inv_map[i] for i in job.get("invoices", []) if i in inv_map]
+    expenses = [exp_map[e] for e in job.get("expenses", []) if e in exp_map]
+    revenue = sum(float(inv.get("amount", 0) or 0) for inv in invoices
+                  if inv.get("status") != "cancelled")
+    costs = sum(float(exp.get("amount", 0) or 0) for exp in expenses)
+    if revenue > 0:
+        return round((revenue - costs) / revenue * 100, 2)
+    return None
+
+
+def _cost_breakdown(db: dict, job: dict) -> dict:
+    """Per-job cost bucketed into categories. A7+A8."""
+    budget = job.get("budget") or {}
+    loaded_rate = float(budget.get("loaded_labor_rate") or 0)
+    burden = 1.45
+
+    labor_cost = 0.0
+    for log in job.get("production_logs") or []:
+        for htype, hrs in (log.get("hours_by_type") or {}).items():
+            labor_cost += float(hrs or 0) * loaded_rate * burden
+
+    financials = db.get("financials") or {}
+    exp_map = financials.get("expenses", {})
+    material_cost = 0.0
+    equipment_cost = 0.0
+    sub_cost = 0.0
+    other_cost = 0.0
+    for eid in job.get("expenses", []):
+        exp = exp_map.get(eid, {})
+        cat = (exp.get("category") or "other").lower()
+        amt = float(exp.get("amount") or 0)
+        if "material" in cat or "coating" in cat or "product" in cat:
+            material_cost += amt
+        elif "equipment" in cat or "spray" in cat or "rig" in cat:
+            equipment_cost += amt
+        elif "sub" in cat or "contractor" in cat:
+            sub_cost += amt
+        else:
+            other_cost += amt
+
+    co_added = sum(
+        float(co.get("price") or 0)
+        for co in job.get("change_orders") or []
+        if co.get("approved_at")
+    )
+    contract = float(budget.get("contract_value") or 0) + co_added
+    total_cost = labor_cost + material_cost + equipment_cost + sub_cost + other_cost
+    profit = contract - total_cost
+    margin = round(profit / contract * 100, 2) if contract > 0 else 0.0
+
+    return {
+        "burdened_labor": round(labor_cost, 2),
+        "material": round(material_cost, 2),
+        "equipment": round(equipment_cost, 2),
+        "subcontractor": round(sub_cost, 2),
+        "other": round(other_cost, 2),
+        "total_cost": round(total_cost, 2),
+        "contract_value": round(contract, 2),
+        "profit": round(profit, 2),
+        "margin_pct": margin,
+    }
+
+
+def _weather_verdict_from_forecast(forecast: dict, profile: dict) -> dict:
+    """Analyze a 12-hour forecast window against a weather profile."""
+    hourly = forecast.get("hourly", {})
+    temps = hourly.get("temperature_2m", [])[:12]
+    rh = hourly.get("relativehumidity_2m", [])[:12]
+    precip = hourly.get("precipitation_probability", [])[:12]
+
+    flags = []
+    if temps:
+        if min(temps) < profile.get("temp_min", 40):
+            flags.append(f"Temp too low ({min(temps):.0f}°F < {profile['temp_min']}°F min)")
+        if max(temps) > profile.get("temp_max", 120):
+            flags.append(f"Temp too high ({max(temps):.0f}°F > {profile['temp_max']}°F max)")
+    if rh and max(rh) > profile.get("rh_max", 85):
+        flags.append(f"Humidity too high ({max(rh):.0f}% > {profile['rh_max']}%)")
+    cure_hrs = int(profile.get("min_cure_before_rain_hrs", 4))
+    if precip:
+        if max(precip[:cure_hrs] if len(precip) >= cure_hrs else precip) > 40:
+            flags.append(f"Rain risk within {cure_hrs}h cure window — warranty may be voided")
+
+    verdict = "GREEN" if not flags else (
+        "RED" if any(kw in f for f in flags for kw in ("too low", "too high", "warranty"))
+        else "YELLOW"
+    )
+    return {"verdict": verdict, "reason": "; ".join(flags) if flags else "All conditions within spec",
+            "flags": flags, "checked_at": datetime.now().isoformat()}
+
+
+def _fetch_weather(lat: float, lon: float) -> dict:
+    """Fetch 24h forecast from Open-Meteo (free, no key required)."""
+    import requests
+    params = {
+        "latitude": lat, "longitude": lon,
+        "hourly": "temperature_2m,relativehumidity_2m,precipitation_probability",
+        "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 2,
+    }
+    r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _geocode(address: str) -> tuple:
+    """Return (lat, lon) for an address using Nominatim (free)."""
+    import requests
+    r = requests.get("https://nominatim.openstreetmap.org/search",
+                     params={"q": address, "format": "json", "limit": 1},
+                     headers={"User-Agent": "TruAgent/1.0"},
+                     timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if data:
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    return None, None
+
+
+def _merge_template(body: str, job: dict) -> str:
+    """Replace {{token}} placeholders with job/budget data."""
+    budget = job.get("budget") or {}
+    warranty = job.get("warranty") or {}
+    replacements = {
+        "client_name": job.get("client_name", ""),
+        "address": job.get("address", ""),
+        "job_id": job.get("job_id", ""),
+        "coating_system": budget.get("system", job.get("coating_system", "")),
+        "substrate": budget.get("substrate", job.get("substrate", "")),
+        "sqft": str(budget.get("sqft", "")),
+        "dry_mil_spec": str(budget.get("dry_mil_target", "")),
+        "contract_value": str(budget.get("contract_value", "")),
+        "warranty_years": str(warranty.get("term_years", "")),
+        "warranty_type": warranty.get("warranty_type", ""),
+        "manufacturer": warranty.get("manufacturer", ""),
+        "today": datetime.now().strftime("%Y-%m-%d"),
+    }
+    result = body
+    for token, value in replacements.items():
+        result = result.replace("{{" + token + "}}", str(value))
+    return result
+
+
+def _ar_aging_buckets(db: dict) -> dict:
+    """Bucket unpaid invoices into 0-30/31-60/61-90/90+ days past due."""
+    buckets = {"0_30": [], "31_60": [], "61_90": [], "over_90": [], "current": []}
+    now = datetime.now()
+    for inv_id, inv in (db.get("financials", {}).get("invoices", {})).items():
+        if inv.get("status") in ("paid", "cancelled"):
+            continue
+        try:
+            due = datetime.fromisoformat(inv.get("due_date") or inv.get("date") or now.isoformat())
+        except Exception:
+            continue
+        days = (now - due).days
+        inv_summary = {"id": inv_id, "amount": inv.get("amount"), "job_id": inv.get("job_id"),
+                       "customer": inv.get("customer_name"), "days_past_due": days}
+        if days <= 0:
+            buckets["current"].append(inv_summary)
+        elif days <= 30:
+            buckets["0_30"].append(inv_summary)
+        elif days <= 60:
+            buckets["31_60"].append(inv_summary)
+        elif days <= 90:
+            buckets["61_90"].append(inv_summary)
+        else:
+            buckets["over_90"].append(inv_summary)
+    return buckets
+
+
+def _compliance_summary(db: dict) -> dict:
+    """Roll up expiring/missing COIs, certs, and uncleared parties."""
+    now = datetime.now()
+    warn_days = 30
+    expiring_cois = []
+    for pid, party in (db.get("parties") or {}).items():
+        for coi in party.get("cois", []):
+            try:
+                exp = datetime.fromisoformat(coi.get("expiry") or "")
+                days = (exp - now).days
+                if days <= warn_days:
+                    expiring_cois.append({"party": party.get("name"), "party_id": pid,
+                                          "carrier": coi.get("carrier"), "days_until_expiry": days})
+            except Exception:
+                pass
+    expiring_certs = []
+    for eid, emp in (db.get("employees") or {}).items():
+        for cert in emp.get("certs", []):
+            if not cert.get("expiry"):
+                continue
+            try:
+                exp = datetime.fromisoformat(cert["expiry"])
+                days = (exp - now).days
+                if days <= warn_days:
+                    expiring_certs.append({"employee": emp.get("name"), "employee_id": eid,
+                                           "cert_type": cert.get("cert_type"), "days_until_expiry": days})
+            except Exception:
+                pass
+    uncleared = [
+        {"party": p.get("name"), "id": pid, "type": p.get("party_type")}
+        for pid, p in (db.get("parties") or {}).items()
+        if not p.get("cleared")
+    ]
+    return {"expiring_cois": expiring_cois, "expiring_certs": expiring_certs,
+            "uncleared_parties": uncleared, "checked_at": datetime.now().isoformat()}
+
+
+def _send_email_or_log(db: dict, to: str, subject: str, body: str, sent_by: str) -> str:
+    """Best-effort email send; returns 'sent', 'not configured', or error."""
+    if not EMAIL_WEBHOOK_URL:
+        return "not configured"
+    try:
+        import requests
+        requests.post(EMAIL_WEBHOOK_URL, json={"to": to, "subject": subject, "body": body,
+                                               "sent_by": sent_by, "sent_at": datetime.now().isoformat()},
+                      timeout=10).raise_for_status()
+        return "sent"
+    except Exception as e:
+        return f"error: {e}"
+
+
 # OpenAI tool/function specs. Financial tools are exposed only to manager+.
 _TOOL_DEFS = {
     "list_jobs": {"type": "function", "function": {
@@ -472,11 +1040,62 @@ _TOOL_DEFS = {
         "name": "company_financials_summary",
         "description": "Get company-wide totals: revenue, costs, profit and margin across all jobs (manager/admin only).",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "get_production_data": {"type": "function", "function": {
+        "name": "get_production_data",
+        "description": "Get production summary for a job: gallons applied vs estimated, % complete, QA flags, coat status, punch items.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "get_overbudget_jobs": {"type": "function", "function": {
+        "name": "get_overbudget_jobs",
+        "description": "List jobs where applied gallons exceed estimated, or hours exceed budget, or margin has fallen.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "get_compliance_summary": {"type": "function", "function": {
+        "name": "get_compliance_summary",
+        "description": "Get a summary of expiring COIs, lapsing employee certs, and uncleared subcontractors (manager/admin only).",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "get_pipeline_summary": {"type": "function", "function": {
+        "name": "get_pipeline_summary",
+        "description": "Get the sales pipeline: open opportunities by stage, with values and rep assignment (manager/admin only).",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    "get_job_report": {"type": "function", "function": {
+        "name": "get_job_report",
+        "description": "Generate a natural-language summary report for one job: stage, gallons vs est, mil compliance, open issues, next action. Financial details shown to manager+ only.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "advance_pipeline_stage": {"type": "function", "function": {
+        "name": "advance_pipeline_stage",
+        "description": "Advance an opportunity or job to the next pipeline stage. Syncs to Roofr when configured.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"},
+            "stage": {"type": "string", "description": "Target stage: New Lead, Site Survey, Measured/Cores, Estimating, Proposal, Negotiation, Won, Lost"}},
+            "required": ["job_id", "stage"], "additionalProperties": False}}},
+    "search_docs": {"type": "function", "function": {
+        "name": "search_docs",
+        "description": "Search uploaded documents (specs, SDS, warranties, contracts) by keyword and return relevant excerpts with citations.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search query, e.g. 'inter-coat window silicone' or 'volume solids Gaco'"}},
+            "required": ["query"], "additionalProperties": False}}},
+    "get_weather_verdict": {"type": "function", "function": {
+        "name": "get_weather_verdict",
+        "description": "Check today's weather for a job address vs the coating system's application limits. Returns GREEN/YELLOW/RED.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}},
+            "required": ["job_id"], "additionalProperties": False}}},
+    "get_anomalies": {"type": "function", "function": {
+        "name": "get_anomalies",
+        "description": "Detect jobs with budget overruns, stalled production, past-due invoices, or approved jobs not yet started.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
 }
 
 _COMMON_TOOLS = ["list_jobs", "get_job", "update_job_status", "add_job_note",
-                 "list_documents", "send_email", "send_sms"]
-_FINANCIAL_TOOLS = ["get_job_financials", "company_financials_summary"]
+                 "list_documents", "send_email", "send_sms",
+                 "get_production_data", "get_overbudget_jobs", "get_job_report",
+                 "search_docs", "get_weather_verdict", "get_anomalies"]
+_FINANCIAL_TOOLS = ["get_job_financials", "company_financials_summary",
+                    "get_compliance_summary", "get_pipeline_summary",
+                    "advance_pipeline_stage"]
 
 
 def tools_for_role(role: str) -> list:
@@ -524,6 +1143,164 @@ def execute_agent_tool(name: str, args: dict, current_user: dict, db: dict) -> d
         return _job_financials(db, args.get("job_id"))
     if name == "company_financials_summary":
         return _company_financials_summary(db)
+
+    # ── New tools ──────────────────────────────────────────────────────────────
+    if name == "get_production_data":
+        job = db["jobs"].get(args.get("job_id"))
+        if not job:
+            return {"status": "error", "message": "Job not found"}
+        applied = _applied_gallons_by_product(job)
+        est = (job.get("budget") or {}).get("est_gallons") or {}
+        pct = _production_pct_complete(job)
+        qa_flags = [r for r in job.get("qa_readings", []) if r.get("flag")]
+        punch_open = [p for p in job.get("punch_items", []) if p.get("status") != "done"]
+        return {"status": "ok", "job_id": args.get("job_id"),
+                "pct_complete": pct, "applied_gallons": applied,
+                "est_gallons": est, "qa_flags": qa_flags[:5], "open_punch_items": len(punch_open),
+                "log_count": len(job.get("production_logs", []))}
+
+    if name == "get_overbudget_jobs":
+        results = []
+        for jid, job in db["jobs"].items():
+            budget = job.get("budget") or {}
+            est = budget.get("est_gallons") or {}
+            applied = _applied_gallons_by_product(job)
+            for prod, est_gals in est.items():
+                app_gals = applied.get(prod, 0)
+                if app_gals > float(est_gals or 0) * 1.0 and float(est_gals or 0) > 0:
+                    results.append({"job_id": jid, "client": job.get("client_name"),
+                                    "product": prod, "applied": app_gals,
+                                    "estimated": est_gals, "overrun_pct": round((app_gals - float(est_gals)) / float(est_gals) * 100, 1)})
+        return {"status": "ok", "overbudget_jobs": results}
+
+    if name == "get_compliance_summary":
+        if role not in ("manager", "super_admin"):
+            return {"status": "error", "message": "Manager access required"}
+        return {"status": "ok", **_compliance_summary(db)}
+
+    if name == "get_pipeline_summary":
+        if role not in ("manager", "super_admin"):
+            return {"status": "error", "message": "Manager access required"}
+        stages: Dict[str, list] = {}
+        for oid, opp in db.get("opportunities", {}).items():
+            s = opp.get("stage", "New Lead")
+            stages.setdefault(s, []).append({
+                "id": oid, "client": opp.get("client_name"),
+                "address": opp.get("address"), "value": opp.get("contract_value"),
+                "rep": opp.get("rep"),
+            })
+        return {"status": "ok", "pipeline": stages,
+                "total_opportunities": len(db.get("opportunities", {}))}
+
+    if name == "get_job_report":
+        job = db["jobs"].get(args.get("job_id"))
+        if not job:
+            return {"status": "error", "message": "Job not found"}
+        budget = job.get("budget") or {}
+        applied = _applied_gallons_by_product(job)
+        pct = _production_pct_complete(job)
+        qa_flags = [r for r in job.get("qa_readings", []) if r.get("flag")]
+        punch_open = [p for p in job.get("punch_items", []) if p.get("status") != "done"]
+        report = {
+            "job_id": args.get("job_id"), "client": job.get("client_name"),
+            "address": job.get("address"), "stage": job.get("workflow_stage"),
+            "status": job.get("status"), "pct_complete": pct,
+            "applied_gallons": applied, "est_gallons": budget.get("est_gallons"),
+            "system": budget.get("system"), "substrate": budget.get("substrate"),
+            "open_punch_items": len(punch_open), "qa_flags": len(qa_flags),
+            "warranty_status": (job.get("warranty") or {}).get("registered"),
+        }
+        if role in ("manager", "super_admin"):
+            cb = _cost_breakdown(db, job)
+            report["financials"] = cb
+        return {"status": "ok", "report": report}
+
+    if name == "advance_pipeline_stage":
+        if role not in ("manager", "super_admin"):
+            return {"status": "error", "message": "Manager access required"}
+        jid = args.get("job_id")
+        stage = args.get("stage")
+        job = db["jobs"].get(jid)
+        opp = db.get("opportunities", {}).get(jid)
+        if job:
+            job["workflow_stage"] = stage
+            timeline = job.setdefault("timeline", [])
+            timeline.append({"event": "stage_changed", "stage": stage,
+                             "by": email, "at": datetime.now().isoformat()})
+            save_db(db)
+            sync = _sync_to_roofr({"job_id": jid, "workflow_stage": stage, "updated_by": email,
+                                    "updated_at": datetime.now().isoformat()})
+            return {"status": "ok", "job_id": jid, "new_stage": stage, "roofr_sync": sync}
+        if opp:
+            opp["stage"] = stage
+            opp.setdefault("timeline", []).append({"event": "stage_changed", "stage": stage,
+                                                   "by": email, "at": datetime.now().isoformat()})
+            save_db(db)
+            return {"status": "ok", "opportunity_id": jid, "new_stage": stage}
+        return {"status": "error", "message": f"No job or opportunity found for id {jid!r}"}
+
+    if name == "search_docs":
+        query = (args.get("query") or "").lower()
+        results = []
+        for doc_id, chunks in db.get("doc_chunks", {}).items():
+            doc = db["documents"].get(doc_id, {})
+            for chunk in chunks:
+                text = chunk.get("text", "")
+                if any(word in text.lower() for word in query.split()):
+                    results.append({"doc_id": doc_id, "filename": doc.get("filename"),
+                                    "excerpt": text[:400], "page": chunk.get("page")})
+                    if len(results) >= 5:
+                        break
+            if len(results) >= 5:
+                break
+        return {"status": "ok", "results": results, "query": query,
+                "note": "Upload documents and use /documents/{id}/index to enable search"}
+
+    if name == "get_weather_verdict":
+        job = db["jobs"].get(args.get("job_id"))
+        if not job:
+            return {"status": "error", "message": "Job not found"}
+        weather_status = job.get("weather_status") or {}
+        return {"status": "ok", "job_id": args.get("job_id"),
+                "address": job.get("address"),
+                "system": (job.get("budget") or {}).get("system"),
+                "verdict": weather_status.get("verdict", "UNKNOWN"),
+                "reason": weather_status.get("reason", "No weather check run yet"),
+                "checked_at": weather_status.get("checked_at"),
+                "tip": "POST /job/{job_id}/weather-check to refresh"}
+
+    if name == "get_anomalies":
+        flags = []
+        now = datetime.now()
+        for jid, job in db["jobs"].items():
+            budget = job.get("budget") or {}
+            applied = _applied_gallons_by_product(job)
+            est = budget.get("est_gallons") or {}
+            # Gallons overrun
+            for prod, est_gals in est.items():
+                app = applied.get(prod, 0)
+                if app > float(est_gals or 0) * 1.05:
+                    flags.append({"type": "gallons_overrun", "job_id": jid,
+                                  "client": job.get("client_name"), "product": prod})
+            # Stalled (no log in 5 days, if approved/in-progress)
+            logs = job.get("production_logs") or []
+            if logs and job.get("status") in ("In Progress", "Approved"):
+                last_log = max(logs, key=lambda l: l.get("date", ""), default=None)
+                if last_log:
+                    try:
+                        d = datetime.fromisoformat(last_log["date"])
+                        if (now - d).days > 5:
+                            flags.append({"type": "stalled", "job_id": jid,
+                                          "client": job.get("client_name"),
+                                          "days_since_log": (now - d).days})
+                    except Exception:
+                        pass
+            # Approved but no production start
+            if job.get("workflow_stage") == "Approved" and not logs:
+                flags.append({"type": "approved_no_start", "job_id": jid,
+                               "client": job.get("client_name")})
+        return {"status": "ok", "anomaly_flags": flags, "count": len(flags)}
+
     return {"status": "error", "message": f"Unknown tool: {name}"}
 
 
@@ -1331,6 +2108,1696 @@ async def update_user_role(email: str, role_data: UpdateRole, current_user: dict
     save_db(db)
     
     return {"status": "ok", "message": f"User {email} role updated to {role_data.role}"}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F1 — Alpha Estimator inbound door (estimate baseline import)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/alpha/webhook")
+async def alpha_webhook(payload: AlphaWebhook):
+    if payload.secret != ALPHA_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid Alpha webhook secret")
+    db = load_db()
+    job_id = payload.job_id
+    job = db["jobs"].setdefault(job_id, {"job_id": job_id})
+    # Update basic job fields if provided
+    for field in ("client_name", "address"):
+        val = getattr(payload, field, None)
+        if val:
+            job[field] = val
+    extra = payload.data or {}
+    if extra:
+        job.update({k: v for k, v in extra.items() if v not in (None, "")})
+    budget = job.setdefault("budget", {})
+    if payload.contract_value is not None:
+        budget["contract_value"] = payload.contract_value
+    if payload.coating_system:
+        budget["system"] = payload.coating_system
+        job["coating_system"] = payload.coating_system
+    if payload.substrate:
+        budget["substrate"] = payload.substrate
+    if payload.sqft is not None:
+        budget["sqft"] = payload.sqft
+    if payload.dry_mil_target is not None:
+        budget["dry_mil_target"] = payload.dry_mil_target
+    if payload.quoted_margin is not None:
+        budget["quoted_margin"] = payload.quoted_margin
+    if payload.loaded_labor_rate is not None:
+        budget["loaded_labor_rate"] = payload.loaded_labor_rate
+    if payload.est_gallons:
+        budget["est_gallons"] = payload.est_gallons
+    if payload.material_cost_per_gal:
+        budget["material_cost_per_gal"] = payload.material_cost_per_gal
+    if payload.labor_hours_by_method:
+        budget["labor_hours_by_method"] = payload.labor_hours_by_method
+    budget["imported_at"] = datetime.now().isoformat()
+    save_db(db)
+    return {"status": "ok", "job_id": job_id, "message": "Estimate baseline imported",
+            "budget_fields": list(budget.keys())}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F2 — Delta Coating Logistics inbound door (production log)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/production/webhook")
+async def production_webhook(payload: ProductionLogWebhook):
+    if payload.secret != PRODUCTION_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid production webhook secret")
+    db = load_db()
+    job = db["jobs"].get(payload.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {payload.job_id!r} not found")
+    log_entry = {
+        "date": payload.date,
+        "crew": payload.crew,
+        "product": payload.product,
+        "gallons_applied": payload.gallons_applied,
+        "gallons_by_product": payload.gallons_by_product or (
+            {payload.product: payload.gallons_applied} if payload.product and payload.gallons_applied else {}),
+        "sqft_coated": payload.sqft_coated,
+        "wet_mil": payload.wet_mil or [],
+        "hours_by_type": payload.hours_by_type or {},
+        "weather": payload.weather or {},
+        "photo_refs": payload.photo_refs or [],
+        "notes": payload.notes,
+        "coat_seq": payload.coat_seq,
+        "logged_at": datetime.now().isoformat(),
+    }
+    job.setdefault("production_logs", []).append(log_entry)
+    pct = _production_pct_complete(job)
+    job["pct_complete"] = pct
+    # Auto-check margin alert (A11)
+    budget = job.get("budget") or {}
+    est_gallons = budget.get("est_gallons") or {}
+    applied = _applied_gallons_by_product(job)
+    for prod, est_gals in est_gallons.items():
+        if applied.get(prod, 0) > float(est_gals or 0) * 1.05:
+            job.setdefault("alerts", []).append({
+                "type": "gallons_overrun", "product": prod,
+                "at": datetime.now().isoformat(),
+            })
+    save_db(db)
+    return {"status": "ok", "job_id": payload.job_id, "pct_complete": pct,
+            "applied_gallons": applied, "message": "Production log appended"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F3 — Dominate lead inbound door
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/leads/webhook")
+async def leads_webhook(payload: LeadWebhook):
+    if payload.secret != LEADS_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid leads webhook secret")
+    db = load_db()
+    # Dedupe by address+name
+    address = (payload.address or "").strip().lower()
+    client = (payload.client_name or "").strip().lower()
+    for oid, opp in db.get("opportunities", {}).items():
+        if (opp.get("address", "").lower() == address and
+                opp.get("client_name", "").lower() == client and address):
+            opp["last_seen"] = datetime.now().isoformat()
+            save_db(db)
+            return {"status": "ok", "message": "Duplicate lead — opportunity updated",
+                    "opportunity_id": oid, "duplicate": True}
+    opp_id = f"opp_{int(datetime.now().timestamp() * 1000)}"
+    sla_hours = 24
+    opp = {
+        "id": opp_id,
+        "client_name": payload.client_name,
+        "address": payload.address,
+        "phone": payload.phone,
+        "email": payload.email,
+        "notes": payload.notes,
+        "rep": payload.rep,
+        "source": payload.source or "unknown",
+        "stage": "New Lead",
+        "first_touch_at": datetime.now().isoformat(),
+        "sla_due": (datetime.now() + timedelta(hours=sla_hours)).isoformat(),
+        "timeline": [{"event": "lead_created", "source": payload.source,
+                      "at": datetime.now().isoformat()}],
+    }
+    if payload.data:
+        opp.update({k: v for k, v in payload.data.items() if v not in (None, "")})
+    db.setdefault("opportunities", {})[opp_id] = opp
+    save_db(db)
+    return {"status": "ok", "opportunity_id": opp_id, "stage": "New Lead",
+            "sla_due": opp["sla_due"], "message": "Lead created"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F4 — Scheduler primitive
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CRON_TASKS: Dict[str, Any] = {}  # registered task handlers (set in later sections)
+
+@app.post("/cron/tick")
+async def cron_tick(task: str = "noop", secret: str = ""):
+    if secret != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid cron secret")
+    log_entry = {"task": task, "fired_at": datetime.now().isoformat(), "result": None}
+    handler = _CRON_TASKS.get(task)
+    if handler:
+        try:
+            result = handler()
+            log_entry["result"] = result
+        except Exception as e:
+            log_entry["result"] = f"error: {e}"
+    else:
+        log_entry["result"] = "noop — task not registered"
+    db = load_db()
+    db.setdefault("cron_log", []).append(log_entry)
+    if len(db["cron_log"]) > 500:
+        db["cron_log"] = db["cron_log"][-500:]
+    save_db(db)
+    return {"status": "ok", "task": task, "result": log_entry["result"]}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F5 — QB expense enrichment (extended from existing /quickbooks/webhook)
+# GET endpoint exposes purchased-gallon rollup per job
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/job/{job_id}/material-costs")
+async def get_material_costs(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    financials = db.get("financials", {})
+    exp_map = financials.get("expenses", {})
+    material_expenses = []
+    purchased_gallons: Dict[str, float] = {}
+    for eid in job.get("expenses", []):
+        exp = exp_map.get(eid, {})
+        if not exp:
+            continue
+        cat = (exp.get("category") or "").lower()
+        if "material" in cat or "coating" in cat or "product" in cat or exp.get("product"):
+            material_expenses.append(exp)
+            prod = exp.get("product") or exp.get("description") or "unknown"
+            gals = float(exp.get("gallons_purchased") or 0)
+            if gals:
+                purchased_gallons[prod] = purchased_gallons.get(prod, 0) + gals
+    budget = job.get("budget") or {}
+    est_gallons = budget.get("est_gallons") or {}
+    applied = _applied_gallons_by_product(job)
+    comparison = {}
+    for prod in set(list(est_gallons.keys()) + list(purchased_gallons.keys()) + list(applied.keys())):
+        comparison[prod] = {
+            "estimated": est_gallons.get(prod, 0),
+            "purchased": purchased_gallons.get(prod, 0),
+            "applied": applied.get(prod, 0),
+        }
+    return {"status": "ok", "job_id": job_id, "material_expenses": material_expenses,
+            "purchased_gallons": purchased_gallons, "gallon_comparison": comparison}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F6 — Weather profiles admin + per-job weather check
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/weather-profiles")
+async def get_weather_profiles(current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    return {"status": "ok", "weather_profiles": db.get("weather_profiles", {})}
+
+@app.put("/admin/weather-profiles")
+async def update_weather_profiles(profiles: dict, current_user: dict = Depends(get_super_admin)):
+    db = load_db()
+    db["weather_profiles"].update(profiles)
+    save_db(db)
+    return {"status": "ok", "message": "Weather profiles updated", "systems": list(profiles.keys())}
+
+@app.post("/job/{job_id}/weather-check")
+async def job_weather_check(job_id: str, req: WeatherCheckRequest,
+                            current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    system = req.coating_system or (job.get("budget") or {}).get("system") or job.get("coating_system") or "default"
+    profile = db.get("weather_profiles", {}).get(system.lower()) or list(db.get("weather_profiles", _DEFAULT_WEATHER_PROFILES).values())[0]
+    lat, lon = req.lat, req.lon
+    if lat is None or lon is None:
+        address = job.get("address")
+        if address:
+            try:
+                lat, lon = _geocode(address)
+            except Exception:
+                pass
+    if lat is None or lon is None:
+        return {"status": "ok", "verdict": "UNKNOWN",
+                "reason": "Provide lat/lon or ensure job has an address for geocoding"}
+    try:
+        forecast = _fetch_weather(lat, lon)
+        verdict_data = _weather_verdict_from_forecast(forecast, profile)
+    except Exception as e:
+        return {"status": "error", "message": f"Weather fetch failed: {e}"}
+    job["weather_status"] = verdict_data
+    save_db(db)
+    return {"status": "ok", "job_id": job_id, **verdict_data}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A-phase — Accounting, Job Costing & Finance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/job/{job_id}/cost-breakdown")
+async def job_cost_breakdown(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A7 + A8: Per-job cost categories with 45% burden on labor."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "job_id": job_id, **_cost_breakdown(db, job)}
+
+@app.get("/job/{job_id}/gallons-tracker")
+async def gallons_tracker(job_id: str, current_user: dict = Depends(get_current_user)):
+    """A9: Applied vs. estimated gallons per product (three-bucket model)."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    budget = job.get("budget") or {}
+    est = budget.get("est_gallons") or {}
+    applied = _applied_gallons_by_product(job)
+    result = {}
+    for prod in set(list(est.keys()) + list(applied.keys())):
+        e = float(est.get(prod) or 0)
+        a = applied.get(prod, 0)
+        pct = round(a / e * 100, 1) if e > 0 else None
+        result[prod] = {"estimated": e, "applied": a, "pct_consumed": pct,
+                        "overrun": a > e * 1.0 if e > 0 else False}
+    return {"status": "ok", "job_id": job_id, "gallons": result,
+            "pct_complete": _production_pct_complete(job)}
+
+@app.get("/job/{job_id}/coverage")
+async def coverage_reconciliation(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A10: Achieved dry-mil from gallons+sqft+volume-solids vs. estimate AND spec min."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    budget = job.get("budget") or {}
+    system = budget.get("system") or job.get("coating_system") or ""
+    vs = _get_volume_solids(system)
+    sqft = float(budget.get("sqft") or 0)
+    dry_mil_target = float(budget.get("dry_mil_target") or 0)
+    applied = _applied_gallons_by_product(job)
+    total_applied = sum(applied.values())
+    achieved = _calc_achieved_dry_mil(total_applied, sqft, vs)
+    warranty_min = (job.get("warranty") or {}).get("required_mil") or dry_mil_target
+    wet_mil_readings = [r for log in job.get("production_logs", []) for r in (log.get("wet_mil") or [])]
+    avg_wet_mil = round(sum(wet_mil_readings) / len(wet_mil_readings), 2) if wet_mil_readings else None
+    flag = None
+    if achieved > 0 and warranty_min > 0:
+        if achieved < warranty_min * 0.95:
+            flag = "TOO_THIN — warranty risk"
+        elif achieved > dry_mil_target * 1.20:
+            flag = "TOO_THICK — margin loss"
+    return {
+        "status": "ok", "job_id": job_id, "system": system, "volume_solids_pct": round(vs * 100, 1),
+        "sqft": sqft, "total_applied_gallons": round(total_applied, 2),
+        "achieved_dry_mil": achieved, "target_dry_mil": dry_mil_target,
+        "warranty_min_mil": warranty_min, "avg_wet_mil_reading": avg_wet_mil,
+        "flag": flag,
+    }
+
+@app.get("/job/{job_id}/margin-alert")
+async def margin_alert(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A11: Fire when live margin drops >5 pts below quote."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    budget = job.get("budget") or {}
+    quoted = float(budget.get("quoted_margin") or 0)
+    live = _job_margin_live(db, job)
+    cb = _cost_breakdown(db, job)
+    projected_margin = cb.get("margin_pct", 0)
+    alerts = []
+    if quoted > 0 and projected_margin < quoted - 5:
+        alerts.append(f"Projected margin {projected_margin:.1f}% is {quoted - projected_margin:.1f} pts below quoted {quoted:.1f}%")
+    if live is not None and quoted > 0 and live < quoted - 5:
+        alerts.append(f"Billed margin {live:.1f}% is {quoted - live:.1f} pts below quote")
+    applied = _applied_gallons_by_product(job)
+    for prod, est_gals in (budget.get("est_gallons") or {}).items():
+        if applied.get(prod, 0) > float(est_gals or 0) * 1.0:
+            alerts.append(f"Gallons overrun on {prod}")
+    return {"status": "ok", "job_id": job_id, "quoted_margin": quoted,
+            "live_billed_margin": live, "projected_margin": projected_margin,
+            "alerts": alerts, "alert_count": len(alerts)}
+
+@app.get("/financials/dashboard")
+async def company_dashboard(current_user: dict = Depends(get_manager_or_above)):
+    """A12: Company-wide profitability dashboard."""
+    db = load_db()
+    jobs = list(db.get("jobs", {}).values())
+    financials = db.get("financials", {})
+    inv_map = financials.get("invoices", {})
+    exp_map = financials.get("expenses", {})
+    total_revenue = total_cost = 0.0
+    by_system: Dict[str, dict] = {}
+    active_jobs = 0
+    for job in jobs:
+        revenue = sum(float(inv_map.get(i, {}).get("amount", 0) or 0)
+                      for i in job.get("invoices", []))
+        cost = sum(float(exp_map.get(e, {}).get("amount", 0) or 0)
+                   for e in job.get("expenses", []))
+        total_revenue += revenue
+        total_cost += cost
+        system = (job.get("budget") or {}).get("system") or "unknown"
+        sys_data = by_system.setdefault(system, {"revenue": 0, "cost": 0, "jobs": 0})
+        sys_data["revenue"] += revenue
+        sys_data["cost"] += cost
+        sys_data["jobs"] += 1
+        if job.get("status") in ("In Progress", "Approved"):
+            active_jobs += 1
+    profit = total_revenue - total_cost
+    margin = round(profit / total_revenue * 100, 2) if total_revenue > 0 else 0
+    for sys_data in by_system.values():
+        r = sys_data["revenue"]
+        c = sys_data["cost"]
+        sys_data["margin_pct"] = round((r - c) / r * 100, 2) if r > 0 else 0
+    backlog = sum(float((j.get("budget") or {}).get("contract_value") or 0)
+                  for j in jobs if j.get("workflow_stage") in ("Won", "Approved"))
+    return {"status": "ok", "total_jobs": len(jobs), "active_jobs": active_jobs,
+            "total_revenue": round(total_revenue, 2), "total_cost": round(total_cost, 2),
+            "profit": round(profit, 2), "margin_pct": margin,
+            "backlog": round(backlog, 2), "by_system": by_system}
+
+@app.get("/financials/wip")
+async def wip_report(current_user: dict = Depends(get_manager_or_above)):
+    """A13: WIP report — earned vs billed per job."""
+    db = load_db()
+    financials = db.get("financials", {})
+    inv_map = financials.get("invoices", {})
+    rows = []
+    for jid, job in db.get("jobs", {}).items():
+        budget = job.get("budget") or {}
+        contract = float(budget.get("contract_value") or 0)
+        if contract <= 0:
+            continue
+        pct = _production_pct_complete(job) / 100.0
+        earned = round(contract * pct, 2)
+        billed = sum(float(inv_map.get(i, {}).get("amount", 0) or 0)
+                     for i in job.get("invoices", []))
+        position = earned - billed
+        rows.append({"job_id": jid, "client": job.get("client_name"),
+                     "contract": contract, "pct_complete": pct * 100,
+                     "earned": earned, "billed": round(billed, 2),
+                     "wip_position": round(position, 2),
+                     "status": "over_billed" if position < 0 else "under_billed" if position > 0 else "on_track"})
+    return {"status": "ok", "wip": rows}
+
+@app.get("/job/{job_id}/draws")
+async def get_draws(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A14: Draw schedule for a job."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "job_id": job_id, "draws": job.get("billing", {}).get("draws", [])}
+
+@app.post("/job/{job_id}/draws")
+async def add_draw(job_id: str, req: DrawRequest,
+                   current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    billing = job.setdefault("billing", {"draws": [], "retainage_pct": req.retainage_pct})
+    retainage = round(req.amount * (req.retainage_pct / 100), 2)
+    net = round(req.amount - retainage, 2)
+    draw = {"id": f"draw_{len(billing.get('draws', [])) + 1}",
+            "description": req.description, "milestone": req.milestone,
+            "gross_amount": req.amount, "retainage_pct": req.retainage_pct,
+            "retainage_held": retainage, "net_invoice": net,
+            "created_at": datetime.now().isoformat(), "status": "pending"}
+    billing.setdefault("draws", []).append(draw)
+    billing["retainage_pct"] = req.retainage_pct
+    save_db(db)
+    return {"status": "ok", "draw": draw, "message": f"Draw created — net invoice: ${net}"}
+
+@app.get("/job/{job_id}/change-orders")
+async def get_change_orders(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "job_id": job_id, "change_orders": job.get("change_orders", [])}
+
+@app.post("/job/{job_id}/change-orders")
+async def add_change_order(job_id: str, req: ChangeOrderRequest,
+                           current_user: dict = Depends(get_manager_or_above)):
+    """A15: Add a change order; approved ones revise the baseline."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    co_id = f"co_{len(job.get('change_orders', [])) + 1}"
+    co = {"id": co_id, "reason": req.reason, "added_gallons": req.added_gallons,
+          "added_hours": req.added_hours, "price": req.price,
+          "approved_by": req.approved_by,
+          "approved_at": datetime.now().isoformat() if req.approved_by else None,
+          "created_at": datetime.now().isoformat()}
+    job.setdefault("change_orders", []).append(co)
+    if req.approved_by:
+        budget = job.setdefault("budget", {})
+        budget["contract_value"] = float(budget.get("contract_value") or 0) + (req.price or 0)
+    save_db(db)
+    return {"status": "ok", "change_order": co}
+
+@app.get("/financials/ar-aging")
+async def ar_aging(current_user: dict = Depends(get_manager_or_above)):
+    """A16: AR aging buckets."""
+    db = load_db()
+    buckets = _ar_aging_buckets(db)
+    totals = {k: sum(i.get("amount") or 0 for i in v) for k, v in buckets.items()}
+    return {"status": "ok", "buckets": buckets, "totals": totals}
+
+@app.get("/financials/ap-aging")
+async def ap_aging(current_user: dict = Depends(get_manager_or_above)):
+    """A17: AP / vendor bill aging."""
+    db = load_db()
+    now = datetime.now()
+    rows = []
+    by_vendor: Dict[str, float] = {}
+    for eid, exp in (db.get("financials", {}).get("expenses", {})).items():
+        if exp.get("status") == "paid":
+            continue
+        vendor = exp.get("vendor_name") or "Unknown"
+        amt = float(exp.get("amount") or 0)
+        by_vendor[vendor] = by_vendor.get(vendor, 0) + amt
+        try:
+            due = datetime.fromisoformat(exp.get("due_date") or exp.get("date") or now.isoformat())
+            days_due = (now - due).days
+        except Exception:
+            days_due = 0
+        rows.append({"expense_id": eid, "vendor": vendor, "amount": amt,
+                     "date": exp.get("date"), "days_due": days_due,
+                     "po_number": exp.get("po_number"),
+                     "po_matched": bool(exp.get("po_matched"))})
+    return {"status": "ok", "vendor_totals": by_vendor, "unpaid_bills": rows}
+
+@app.get("/payroll/export")
+async def payroll_export(period_start: str, period_end: str,
+                         current_user: dict = Depends(get_manager_or_above)):
+    """A18: Aggregate Delta hours per employee for a pay period."""
+    db = load_db()
+    rows: Dict[str, dict] = {}
+    try:
+        start = datetime.fromisoformat(period_start)
+        end = datetime.fromisoformat(period_end)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
+    for jid, job in db.get("jobs", {}).items():
+        for log in job.get("production_logs", []):
+            try:
+                log_date = datetime.fromisoformat(log.get("date") or "")
+            except Exception:
+                continue
+            if not (start <= log_date <= end):
+                continue
+            crew = log.get("crew") or "unknown"
+            emp = rows.setdefault(crew, {"employee": crew, "spray_hrs": 0, "prep_hrs": 0, "total_hrs": 0, "jobs": []})
+            hours = log.get("hours_by_type") or {}
+            emp["spray_hrs"] += float(hours.get("spray", 0))
+            emp["prep_hrs"] += float(hours.get("prep", 0) + hours.get("roller", 0))
+            emp["total_hrs"] += sum(float(v) for v in hours.values())
+            if jid not in emp["jobs"]:
+                emp["jobs"].append(jid)
+        for tl in job.get("timelogs", []):
+            try:
+                tl_date = datetime.fromisoformat(tl.get("arrive") or "")
+            except Exception:
+                continue
+            if not (start <= tl_date <= end):
+                continue
+            emp_name = tl.get("employee") or "unknown"
+            emp = rows.setdefault(emp_name, {"employee": emp_name, "spray_hrs": 0, "prep_hrs": 0, "total_hrs": 0, "jobs": []})
+            hrs = float(tl.get("hours") or 0)
+            emp["total_hrs"] += hrs
+            if tl.get("hours_type") == "spray":
+                emp["spray_hrs"] += hrs
+            elif tl.get("hours_type") == "prep":
+                emp["prep_hrs"] += hrs
+    return {"status": "ok", "period": {"start": period_start, "end": period_end},
+            "employees": list(rows.values())}
+
+@app.get("/job/{job_id}/retainage-release")
+async def retainage_release_status(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """A20: Gate final retainage release on warranty + inspection + punch list."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    warranty = job.get("warranty") or {}
+    punch_open = [p for p in job.get("punch_items", []) if p.get("status") != "done"]
+    gates = {
+        "warranty_registered": bool(warranty.get("registered")),
+        "punch_list_clear": len(punch_open) == 0,
+        "permit_closed": (job.get("permit") or {}).get("status") in ("issued", "closed", "not_required"),
+    }
+    can_release = all(gates.values())
+    billing = job.get("billing") or {}
+    total_retainage = sum(float(d.get("retainage_held") or 0) for d in billing.get("draws", []))
+    return {"status": "ok", "job_id": job_id, "gates": gates, "can_release": can_release,
+            "total_retainage_held": round(total_retainage, 2),
+            "blocking_issues": [k for k, v in gates.items() if not v]}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P-phase — Production & QA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/job/{job_id}/qa-reading")
+async def add_qa_reading(job_id: str, req: QAReadingRequest,
+                         current_user: dict = Depends(get_current_user)):
+    """P21: Wet-mil reading → expected dry-mil, auto-flag below warranty min."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    budget = job.get("budget") or {}
+    system = budget.get("system") or job.get("coating_system") or ""
+    vs = _get_volume_solids(req.product or system)
+    avg_wet = sum(req.wet_mil or []) / max(len(req.wet_mil or []), 1) if req.wet_mil else None
+    expected_dry = round(avg_wet * vs, 2) if avg_wet else None
+    warranty_min = float((job.get("warranty") or {}).get("required_mil") or budget.get("dry_mil_target") or 0)
+    flag = expected_dry is not None and warranty_min > 0 and expected_dry < warranty_min * 0.95
+    reading = {
+        "product": req.product, "coat_seq": req.coat_seq, "area": req.area,
+        "wet_mil": req.wet_mil, "avg_wet_mil": avg_wet,
+        "expected_dry_mil": expected_dry, "volume_solids_pct": round(vs * 100, 1),
+        "warranty_min_mil": warranty_min, "flag": flag,
+        "notes": req.notes, "taken_by": current_user["email"],
+        "taken_at": datetime.now().isoformat(),
+    }
+    job.setdefault("qa_readings", []).append(reading)
+    if flag:
+        job.setdefault("alerts", []).append({"type": "mil_below_min", "coat_seq": req.coat_seq,
+                                              "expected_dry_mil": expected_dry, "at": datetime.now().isoformat()})
+    if flag:
+        job.setdefault("punch_items", []).append({
+            "id": f"punch_{len(job.get('punch_items', [])) + 1}",
+            "description": f"Thin mil on coat {req.coat_seq} area {req.area or 'unknown'} — re-coat required",
+            "area": req.area, "source": "qa_auto", "status": "open",
+            "created_at": datetime.now().isoformat(),
+        })
+    save_db(db)
+    return {"status": "ok", "reading": reading, "flag": flag,
+            "message": "Low mil flagged — punch item auto-created" if flag else "QA reading recorded"}
+
+@app.get("/job/{job_id}/prep-signoff")
+async def get_prep_signoff(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    substrate = (job.get("budget") or {}).get("substrate") or "default"
+    required = _PREP_ITEMS_BY_SUBSTRATE.get(substrate.lower(), _PREP_ITEMS_BY_SUBSTRATE["default"])
+    return {"status": "ok", "job_id": job_id, "substrate": substrate,
+            "required_items": required, "signoff": job.get("prep_signoff")}
+
+@app.post("/job/{job_id}/prep-signoff")
+async def submit_prep_signoff(job_id: str, req: PrepSignoffRequest,
+                              current_user: dict = Depends(get_current_user)):
+    """P22: Substrate prep sign-off — gates production start."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    substrate = req.substrate or (job.get("budget") or {}).get("substrate") or "default"
+    required = _PREP_ITEMS_BY_SUBSTRATE.get(substrate.lower(), _PREP_ITEMS_BY_SUBSTRATE["default"])
+    missing = [item for item in required if not req.items.get(item)]
+    job["prep_signoff"] = {
+        "substrate": substrate, "area": req.area, "items": req.items,
+        "required": required, "missing": missing,
+        "complete": len(missing) == 0, "notes": req.notes,
+        "signed_by": current_user["email"], "signed_at": datetime.now().isoformat(),
+    }
+    save_db(db)
+    return {"status": "ok", "complete": len(missing) == 0, "missing_items": missing,
+            "message": "Prep sign-off complete — ready to coat" if not missing else f"Blocked: {', '.join(missing)}"}
+
+@app.post("/job/{job_id}/weather-application-check")
+async def weather_application_check(job_id: str, req: QAReadingRequest,
+                                     current_user: dict = Depends(get_current_user)):
+    """P23: Record actual weather conditions at time of application vs. spec window."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    notes_dict = json.loads(req.notes) if req.notes and req.notes.startswith("{") else {}
+    actual = notes_dict or {}
+    system = (job.get("budget") or {}).get("system") or job.get("coating_system") or "default"
+    profile = db.get("weather_profiles", _DEFAULT_WEATHER_PROFILES).get(system.lower(), {})
+    flags = []
+    if actual.get("temp") and float(actual["temp"]) < float(profile.get("temp_min", 40)):
+        flags.append("temp_below_min")
+    if actual.get("rh") and float(actual["rh"]) > float(profile.get("rh_max", 85)):
+        flags.append("humidity_above_max")
+    if actual.get("rain_free_hrs_actual", 999) < float(profile.get("rain_free_hrs_apply", 2)):
+        flags.append("rain_free_window_insufficient")
+    record = {
+        "actual_conditions": actual, "system": system, "profile_used": profile,
+        "out_of_window": len(flags) > 0, "flags": flags,
+        "recorded_by": current_user["email"], "recorded_at": datetime.now().isoformat(),
+    }
+    job.setdefault("weather_application_checks", []).append(record)
+    save_db(db)
+    return {"status": "ok", "out_of_window": len(flags) > 0, "flags": flags, "record": record}
+
+@app.get("/job/{job_id}/production-dashboard")
+async def production_dashboard(job_id: str, current_user: dict = Depends(get_current_user)):
+    """P24: Full job production dashboard."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    budget = job.get("budget") or {}
+    applied = _applied_gallons_by_product(job)
+    pct = _production_pct_complete(job)
+    qa_flags = [r for r in job.get("qa_readings", []) if r.get("flag")]
+    open_punch = [p for p in job.get("punch_items", []) if p.get("status") != "done"]
+    latest_log = max(job.get("production_logs", []), key=lambda l: l.get("date", ""), default=None)
+    total_sqft = sum(float(l.get("sqft_coated") or 0) for l in job.get("production_logs", []))
+    total_hrs = sum(sum(float(v) for v in (l.get("hours_by_type") or {}).values())
+                    for l in job.get("production_logs", []))
+    achieved_mil = None
+    vs = _get_volume_solids((budget.get("system") or ""))
+    sqft = float(budget.get("sqft") or 0)
+    if sqft > 0:
+        achieved_mil = _calc_achieved_dry_mil(sum(applied.values()), sqft, vs)
+    health = "good"
+    if qa_flags:
+        health = "warning"
+    if any(v for v in job.get("alerts", []) if v.get("type") == "gallons_overrun"):
+        health = "alert"
+    return {
+        "status": "ok", "job_id": job_id, "client": job.get("client_name"),
+        "pct_complete": pct, "total_sqft_coated": round(total_sqft, 0),
+        "sqft_target": sqft, "applied_gallons": applied,
+        "est_gallons": budget.get("est_gallons"), "total_hours": round(total_hrs, 1),
+        "crew_days": len(job.get("production_logs", [])), "weather_status": job.get("weather_status"),
+        "achieved_dry_mil": achieved_mil, "target_dry_mil": budget.get("dry_mil_target"),
+        "qa_flag_count": len(qa_flags), "open_punch_items": len(open_punch),
+        "health_badge": health, "last_log_date": (latest_log or {}).get("date"),
+        "prep_signoff": job.get("prep_signoff", {}).get("complete"),
+        "warranty": job.get("warranty"),
+    }
+
+@app.get("/job/{job_id}/coat-windows")
+async def coat_windows(job_id: str, current_user: dict = Depends(get_current_user)):
+    """P25: Inter-coat recoat windows — warn on too-soon / lapsed."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    system = (job.get("budget") or {}).get("system") or ""
+    profile = db.get("weather_profiles", {}).get(system.lower(), {})
+    window_hrs = float(profile.get("inter_coat_window_hrs") or 4)
+    coats = sorted(job.get("coats", []), key=lambda c: c.get("seq", 0))
+    now = datetime.now()
+    result = []
+    for i, coat in enumerate(coats):
+        applied_at = coat.get("applied_at")
+        status = {"coat_seq": coat.get("seq"), "product": coat.get("product"),
+                  "applied_at": applied_at}
+        if applied_at:
+            try:
+                applied_dt = datetime.fromisoformat(applied_at)
+                hours_elapsed = (now - applied_dt).total_seconds() / 3600
+                earliest_next = applied_dt + timedelta(hours=window_hrs)
+                status["hours_elapsed"] = round(hours_elapsed, 1)
+                status["earliest_next_coat"] = earliest_next.isoformat()
+                status["ready_for_next_coat"] = hours_elapsed >= window_hrs
+                status["window_lapsed"] = hours_elapsed > window_hrs * 3
+                if status["window_lapsed"]:
+                    status["warning"] = "Inter-coat window may have lapsed — re-prep/scuff may be required"
+            except Exception:
+                pass
+        result.append(status)
+    return {"status": "ok", "job_id": job_id, "system": system,
+            "inter_coat_window_hrs": window_hrs, "coats": result}
+
+@app.post("/job/{job_id}/photos")
+async def upload_job_photo(job_id: str, stage: str = Form("general"),
+                            area: str = Form(""),
+                            file: UploadFile = File(...),
+                            current_user: dict = Depends(get_current_user)):
+    """P26: Photo upload tied to job/area/stage."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    os.makedirs(PHOTOS_DIR, exist_ok=True)
+    photo_id = f"photo_{job_id}_{int(datetime.now().timestamp() * 1000)}"
+    safe_name = os.path.basename(file.filename or "photo.jpg")
+    file_path = os.path.join(PHOTOS_DIR, f"{photo_id}_{safe_name}")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    photo = {"id": photo_id, "filename": safe_name, "filepath": file_path,
+             "stage": stage, "area": area, "taken_by": current_user["email"],
+             "taken_at": datetime.now().isoformat(), "size_bytes": len(content)}
+    job.setdefault("photos", []).append(photo)
+    save_db(db)
+    return {"status": "ok", "photo_id": photo_id, "stage": stage, "area": area}
+
+@app.get("/job/{job_id}/photos")
+async def get_job_photos(job_id: str, stage: Optional[str] = None,
+                          current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    photos = job.get("photos", [])
+    if stage:
+        photos = [p for p in photos if p.get("stage") == stage]
+    return {"status": "ok", "job_id": job_id, "photos": photos}
+
+@app.get("/job/{job_id}/punch-items")
+async def get_punch_items(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "punch_items": job.get("punch_items", [])}
+
+@app.post("/job/{job_id}/punch-items")
+async def add_punch_item(job_id: str, req: PunchItemRequest,
+                          current_user: dict = Depends(get_current_user)):
+    """P27: Add a punch list item."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    item = {"id": f"punch_{len(job.get('punch_items', [])) + 1}",
+            "description": req.description, "area": req.area,
+            "assignee": req.assignee, "photo_ref": req.photo_ref,
+            "status": "open", "source": "manual",
+            "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    job.setdefault("punch_items", []).append(item)
+    save_db(db)
+    return {"status": "ok", "punch_item": item}
+
+@app.put("/job/{job_id}/punch-items/{item_id}")
+async def update_punch_item(job_id: str, item_id: str, req: PunchItemUpdate,
+                             current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    for item in job.get("punch_items", []):
+        if item.get("id") == item_id:
+            item["status"] = req.status
+            if req.notes:
+                item["notes"] = req.notes
+            item["updated_by"] = current_user["email"]
+            item["updated_at"] = datetime.now().isoformat()
+            save_db(db)
+            return {"status": "ok", "punch_item": item}
+    raise HTTPException(status_code=404, detail="Punch item not found")
+
+@app.get("/job/{job_id}/warranty")
+async def get_warranty(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "job_id": job_id, "warranty": job.get("warranty")}
+
+@app.post("/job/{job_id}/warranty")
+async def set_warranty(job_id: str, req: WarrantyRequest,
+                        current_user: dict = Depends(get_manager_or_above)):
+    """P29 / O49: Manufacturer warranty registration."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    w = job.setdefault("warranty", {})
+    for field in ("manufacturer", "warranty_type", "term_years", "required_mil",
+                  "install_date", "registration_deadline", "cert_number",
+                  "registered", "renewal_recoat_due"):
+        val = getattr(req, field, None)
+        if val is not None:
+            w[field] = val
+    w["updated_at"] = datetime.now().isoformat()
+    if req.install_date and req.term_years and not req.renewal_recoat_due:
+        try:
+            install = datetime.fromisoformat(req.install_date)
+            renewal = install.replace(year=install.year + int(req.term_years))
+            w["renewal_recoat_due"] = renewal.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    save_db(db)
+    return {"status": "ok", "warranty": w}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# S-phase — Sales, Estimating Pipeline & CRM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/pipeline")
+async def get_pipeline(current_user: dict = Depends(get_current_user)):
+    """S30: Sales pipeline — all opportunities by stage."""
+    db = load_db()
+    by_stage: Dict[str, list] = {}
+    for oid, opp in db.get("opportunities", {}).items():
+        s = opp.get("stage", "New Lead")
+        entry = {k: opp.get(k) for k in ("id", "client_name", "address", "rep", "source",
+                                          "first_touch_at", "sla_due", "stage")}
+        if isManagerOrAbove := current_user.get("role") in ("manager", "super_admin"):
+            entry["contract_value"] = opp.get("contract_value")
+        by_stage.setdefault(s, []).append(entry)
+    return {"status": "ok", "pipeline": by_stage,
+            "stages": ["New Lead", "Site Survey", "Measured/Cores", "Estimating",
+                       "Proposal", "Negotiation", "Won", "Lost"]}
+
+@app.put("/pipeline/{opportunity_id}/stage")
+async def advance_opp_stage(opportunity_id: str, req: PipelineStageUpdate,
+                             current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    old_stage = opp.get("stage")
+    opp["stage"] = req.stage
+    opp.setdefault("timeline", []).append({
+        "event": "stage_changed", "from": old_stage, "to": req.stage,
+        "notes": req.notes, "by": current_user["email"], "at": datetime.now().isoformat()
+    })
+    if req.stage == "Won" and opp.get("job_id"):
+        job = db["jobs"].get(opp["job_id"])
+        if job:
+            job["workflow_stage"] = "Won"
+            _sync_to_roofr({"job_id": opp["job_id"], "workflow_stage": "Won",
+                             "updated_by": current_user["email"],
+                             "updated_at": datetime.now().isoformat()})
+    save_db(db)
+    return {"status": "ok", "opportunity_id": opportunity_id, "stage": req.stage}
+
+@app.post("/pipeline/{opportunity_id}/cadence")
+async def set_cadence(opportunity_id: str, req: ContactLogRequest,
+                      current_user: dict = Depends(get_current_user)):
+    """S31: Log a cadence step / follow-up action."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    step = {"contact_type": req.contact_type, "summary": req.summary,
+            "by": current_user["email"], "at": datetime.now().isoformat()}
+    opp.setdefault("cadence_log", []).append(step)
+    opp.setdefault("timeline", []).append({"event": "cadence_step", **step})
+    save_db(db)
+    return {"status": "ok", "cadence_step": step}
+
+@app.post("/pipeline/{opportunity_id}/win-loss")
+async def log_win_loss(opportunity_id: str, req: WinLossRequest,
+                        current_user: dict = Depends(get_manager_or_above)):
+    """S32: Record win/loss with coating-specific loss reason."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    opp["stage"] = "Won" if req.outcome == "won" else "Lost"
+    opp["outcome"] = req.outcome
+    opp["loss_reason"] = req.loss_reason
+    opp["outcome_notes"] = req.notes
+    opp["closed_at"] = datetime.now().isoformat()
+    if req.contract_value:
+        opp["contract_value"] = req.contract_value
+    opp.setdefault("timeline", []).append({
+        "event": f"marked_{req.outcome}", "loss_reason": req.loss_reason,
+        "by": current_user["email"], "at": datetime.now().isoformat()
+    })
+    save_db(db)
+    return {"status": "ok", "outcome": req.outcome, "stage": opp["stage"]}
+
+@app.get("/sales/win-loss")
+async def win_loss_report(current_user: dict = Depends(get_manager_or_above)):
+    """S32: Win-rate rollups by source/rep/loss reason."""
+    db = load_db()
+    wins = losses = 0
+    by_reason: Dict[str, int] = {}
+    by_rep: Dict[str, dict] = {}
+    for opp in db.get("opportunities", {}).values():
+        outcome = opp.get("outcome")
+        if not outcome:
+            continue
+        rep = opp.get("rep") or "unassigned"
+        rep_data = by_rep.setdefault(rep, {"won": 0, "lost": 0, "total_value": 0})
+        if outcome == "won":
+            wins += 1
+            rep_data["won"] += 1
+            rep_data["total_value"] += float(opp.get("contract_value") or 0)
+        elif outcome == "lost":
+            losses += 1
+            rep_data["lost"] += 1
+            reason = opp.get("loss_reason") or "unknown"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+    total = wins + losses
+    return {"status": "ok", "wins": wins, "losses": losses, "total_closed": total,
+            "win_rate_pct": round(wins / total * 100, 1) if total else 0,
+            "by_loss_reason": by_reason, "by_rep": by_rep}
+
+@app.post("/pipeline/{opportunity_id}/esign-send")
+async def esign_send(opportunity_id: str, req: ESignRequest,
+                      current_user: dict = Depends(get_manager_or_above)):
+    """S33 / O57: Route a document for e-signature."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id) or db["jobs"].get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity or job not found")
+    esign_record = {
+        "document_id": req.document_id, "document_type": req.document_type,
+        "recipient_email": req.recipient_email, "recipient_name": req.recipient_name,
+        "status": "sent", "sent_by": current_user["email"],
+        "sent_at": datetime.now().isoformat(),
+    }
+    if ESIGN_WEBHOOK_URL:
+        try:
+            import requests
+            payload = {**esign_record, "opportunity_id": opportunity_id,
+                       "message": req.message or f"Please sign the {req.document_type}"}
+            r = requests.post(ESIGN_WEBHOOK_URL, json=payload, timeout=10)
+            r.raise_for_status()
+            esign_record["status"] = "sent_via_webhook"
+        except Exception as e:
+            esign_record["note"] = f"webhook error: {e}"
+    opp.setdefault("esign_records", []).append(esign_record)
+    opp.setdefault("timeline", []).append({"event": "esign_sent", **esign_record})
+    save_db(db)
+    return {"status": "ok", "esign_record": esign_record,
+            "note": "Configure ESIGN_WEBHOOK_URL to route via DocuSign/Zapier" if not ESIGN_WEBHOOK_URL else ""}
+
+@app.post("/job/{job_id}/review-request")
+async def schedule_review_request(job_id: str, req: ReviewRequest,
+                                   current_user: dict = Depends(get_manager_or_above)):
+    """S34: Queue a post-cure review-ask."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    warranty = job.get("warranty") or {}
+    install_date = warranty.get("install_date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        install_dt = datetime.fromisoformat(install_date)
+        send_after = (install_dt + timedelta(days=14)).isoformat()
+    except Exception:
+        send_after = datetime.now().isoformat()
+    record = {"platform": req.platform, "message": req.message,
+              "send_after": send_after, "status": "queued",
+              "queued_by": current_user["email"], "queued_at": datetime.now().isoformat()}
+    job.setdefault("review_requests", []).append(record)
+    save_db(db)
+    return {"status": "ok", "review_request": record}
+
+@app.get("/renewals")
+async def renewals_list(current_user: dict = Depends(get_manager_or_above)):
+    """S35: List jobs due for renewal re-coat."""
+    db = load_db()
+    now = datetime.now()
+    results = []
+    for jid, job in db.get("jobs", {}).items():
+        warranty = job.get("warranty") or {}
+        due_str = warranty.get("renewal_recoat_due")
+        if not due_str:
+            continue
+        try:
+            due = datetime.fromisoformat(due_str)
+            days_until = (due - now).days
+            results.append({
+                "job_id": jid, "client": job.get("client_name"),
+                "address": job.get("address"), "system": (job.get("budget") or {}).get("system"),
+                "renewal_due": due_str, "days_until_due": days_until,
+                "warranty_type": warranty.get("warranty_type"),
+                "original_scope": {
+                    "system": (job.get("budget") or {}).get("system"),
+                    "sqft": (job.get("budget") or {}).get("sqft"),
+                    "dry_mil_target": (job.get("budget") or {}).get("dry_mil_target"),
+                }
+            })
+        except Exception:
+            pass
+    results.sort(key=lambda r: r.get("days_until_due", 9999))
+    return {"status": "ok", "renewals": results, "total": len(results)}
+
+@app.get("/sales/performance")
+async def rep_performance(current_user: dict = Depends(get_manager_or_above)):
+    """S36: Territory & rep performance dashboard."""
+    db = load_db()
+    by_rep: Dict[str, dict] = {}
+    for opp in db.get("opportunities", {}).values():
+        rep = opp.get("rep") or "unassigned"
+        d = by_rep.setdefault(rep, {"leads": 0, "won": 0, "lost": 0, "open": 0,
+                                     "total_value": 0, "won_value": 0})
+        d["leads"] += 1
+        outcome = opp.get("outcome")
+        if outcome == "won":
+            d["won"] += 1
+            d["won_value"] += float(opp.get("contract_value") or 0)
+            d["total_value"] += float(opp.get("contract_value") or 0)
+        elif outcome == "lost":
+            d["lost"] += 1
+        else:
+            d["open"] += 1
+    for rep, d in by_rep.items():
+        total_closed = d["won"] + d["lost"]
+        d["win_rate_pct"] = round(d["won"] / total_closed * 100, 1) if total_closed else 0
+    return {"status": "ok", "by_rep": by_rep}
+
+@app.get("/pipeline/{opportunity_id}/timeline")
+async def opp_timeline(opportunity_id: str, current_user: dict = Depends(get_current_user)):
+    """S38: Opportunity timeline & comm log."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    return {"status": "ok", "opportunity_id": opportunity_id,
+            "timeline": opp.get("timeline", []),
+            "cadence_log": opp.get("cadence_log", [])}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C-phase — Scheduling, Dispatch & Crew
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/schedule/assignments")
+async def get_assignments(week_start: Optional[str] = None,
+                           current_user: dict = Depends(get_current_user)):
+    """C39: Crew calendar — all assignments, optionally filtered by week."""
+    db = load_db()
+    assignments = []
+    for jid, job in db.get("jobs", {}).items():
+        for asgn in job.get("schedule_assignments", []):
+            a = {**asgn, "job_id": jid, "client": job.get("client_name"),
+                 "address": job.get("address"),
+                 "system": (job.get("budget") or {}).get("system"),
+                 "weather_status": job.get("weather_status")}
+            if current_user.get("role") not in ("manager", "super_admin"):
+                a.pop("contract_value", None)
+            if week_start:
+                if a.get("date", "") >= week_start:
+                    assignments.append(a)
+            else:
+                assignments.append(a)
+    assignments.sort(key=lambda a: a.get("date", ""))
+    return {"status": "ok", "assignments": assignments}
+
+@app.post("/schedule/assignments")
+async def add_assignment(req: AssignmentRequest,
+                          current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Check sprayer double-booking
+    if req.phase and "spray" in req.phase.lower():
+        for jid, j in db["jobs"].items():
+            for a in j.get("schedule_assignments", []):
+                if a.get("date") == req.date and "spray" in (a.get("phase") or "").lower() and jid != req.job_id:
+                    return {"status": "conflict", "message": f"Sprayer already assigned to job {jid} on {req.date}"}
+    asgn = {"id": f"asgn_{int(datetime.now().timestamp() * 1000)}",
+            "crew": req.crew, "date": req.date, "phase": req.phase,
+            "notes": req.notes, "created_by": current_user["email"],
+            "created_at": datetime.now().isoformat()}
+    job.setdefault("schedule_assignments", []).append(asgn)
+    save_db(db)
+    return {"status": "ok", "assignment": asgn}
+
+@app.get("/schedule/weather-verdicts")
+async def schedule_weather_verdicts(current_user: dict = Depends(get_current_user)):
+    """C40: Today's weather verdict for all scheduled jobs."""
+    db = load_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    results = []
+    for jid, job in db.get("jobs", {}).items():
+        today_assignments = [a for a in job.get("schedule_assignments", [])
+                             if a.get("date") == today]
+        if not today_assignments:
+            continue
+        results.append({
+            "job_id": jid, "client": job.get("client_name"),
+            "address": job.get("address"),
+            "system": (job.get("budget") or {}).get("system"),
+            "verdict": (job.get("weather_status") or {}).get("verdict", "UNKNOWN"),
+            "reason": (job.get("weather_status") or {}).get("reason"),
+            "checked_at": (job.get("weather_status") or {}).get("checked_at"),
+            "assignments": today_assignments,
+        })
+    return {"status": "ok", "date": today, "scheduled_jobs": results}
+
+@app.get("/equipment")
+async def list_equipment(current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    return {"status": "ok", "equipment": db.get("equipment", {})}
+
+@app.post("/equipment")
+async def add_equipment(req: EquipmentRequest,
+                         current_user: dict = Depends(get_manager_or_above)):
+    """C42: Equipment/sprayer registry."""
+    db = load_db()
+    eid = f"eq_{int(datetime.now().timestamp() * 1000)}"
+    item = {"id": eid, "name": req.name, "type": req.equipment_type,
+            "day_rate": req.day_rate, "notes": req.notes,
+            "added_by": current_user["email"], "added_at": datetime.now().isoformat()}
+    db.setdefault("equipment", {})[eid] = item
+    save_db(db)
+    return {"status": "ok", "equipment": item}
+
+@app.get("/schedule/material-staging")
+async def material_staging(days_out: int = 3,
+                            current_user: dict = Depends(get_manager_or_above)):
+    """C43: Flag un-staged jobs within N days of first coat."""
+    db = load_db()
+    cutoff = (datetime.now() + timedelta(days=days_out)).strftime("%Y-%m-%d")
+    flags = []
+    for jid, job in db.get("jobs", {}).items():
+        assignments = sorted(job.get("schedule_assignments", []), key=lambda a: a.get("date", ""))
+        if not assignments:
+            continue
+        first_date = assignments[0].get("date", "")
+        if not (datetime.now().strftime("%Y-%m-%d") <= first_date <= cutoff):
+            continue
+        budget = job.get("budget") or {}
+        est = budget.get("est_gallons") or {}
+        has_material = any(
+            exp for exp in [
+                (db.get("financials", {}).get("expenses", {})).get(eid, {})
+                for eid in job.get("expenses", [])
+            ] if "material" in (exp.get("category") or "").lower()
+        )
+        if not has_material and est:
+            flags.append({"job_id": jid, "client": job.get("client_name"),
+                          "first_date": first_date, "est_gallons": est,
+                          "flag": "material_not_staged"})
+    return {"status": "ok", "days_out": days_out, "unstaged_jobs": flags}
+
+@app.post("/dispatch/send")
+async def send_dispatch_sheet(req: DispatchRequest,
+                               current_user: dict = Depends(get_manager_or_above)):
+    """C44: Send daily dispatch sheet to crew."""
+    db = load_db()
+    job_ids = req.job_ids or [
+        jid for jid, j in db["jobs"].items()
+        if any(a.get("date") == req.date and (not req.crew or a.get("crew") == req.crew)
+               for a in j.get("schedule_assignments", []))
+    ]
+    lines = []
+    for jid in job_ids:
+        job = db["jobs"].get(jid)
+        if not job:
+            continue
+        budget = job.get("budget") or {}
+        weather = job.get("weather_status") or {}
+        lines.append(
+            f"Job {jid}: {job.get('client_name')} — {job.get('address')}\n"
+            f"  System: {budget.get('system')} | Target mil: {budget.get('dry_mil_target')}\n"
+            f"  Weather: {weather.get('verdict', 'UNKNOWN')} — {weather.get('reason', '')}"
+        )
+    body = f"Dispatch Sheet — {req.date}" + ("\n" + f"Crew: {req.crew}" if req.crew else "") + "\n\n" + "\n\n".join(lines)
+    sent = _send_email_or_log(db, "crew@trulineroofing.com", f"Dispatch {req.date}", body, current_user["email"])
+    return {"status": "ok", "dispatch_body": body, "email_status": sent,
+            "note": "No financial data included (field-safe)"}
+
+@app.get("/job/{job_id}/timelogs")
+async def get_timelogs(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "timelogs": job.get("timelogs", [])}
+
+@app.post("/job/{job_id}/timelogs")
+async def add_timelog(job_id: str, req: TimelogRequest,
+                       current_user: dict = Depends(get_current_user)):
+    """C45: Crew time check-in; feeds A8 labor costing."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    hours = 0.0
+    if req.depart:
+        try:
+            arrive = datetime.fromisoformat(req.arrive)
+            depart = datetime.fromisoformat(req.depart)
+            hours = round((depart - arrive).total_seconds() / 3600, 2)
+        except Exception:
+            pass
+    tl = {"employee": req.employee, "arrive": req.arrive, "depart": req.depart,
+          "hours": hours, "hours_type": req.hours_type, "geo": req.geo,
+          "logged_by": current_user["email"], "logged_at": datetime.now().isoformat()}
+    job.setdefault("timelogs", []).append(tl)
+    save_db(db)
+    return {"status": "ok", "timelog": tl}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# O-phase — Office Admin, Compliance & Safety
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/parties")
+async def list_parties(current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    return {"status": "ok", "parties": db.get("parties", {})}
+
+@app.post("/parties")
+async def create_party(req: PartyRequest,
+                        current_user: dict = Depends(get_manager_or_above)):
+    """O47: Create a sub/vendor compliance profile."""
+    db = load_db()
+    pid = f"party_{int(datetime.now().timestamp() * 1000)}"
+    party = {"id": pid, "name": req.name, "party_type": req.party_type,
+             "trade": req.trade, "contact_email": req.contact_email,
+             "contact_phone": req.contact_phone, "cois": [], "certs": [],
+             "w9": False, "subcontract": False, "cleared": False,
+             "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    db.setdefault("parties", {})[pid] = party
+    save_db(db)
+    return {"status": "ok", "party": party}
+
+@app.post("/parties/{party_id}/coi")
+async def add_coi(party_id: str, req: COIRequest,
+                   current_user: dict = Depends(get_manager_or_above)):
+    """O46: Add a COI for a sub/vendor."""
+    db = load_db()
+    party = db.get("parties", {}).get(party_id)
+    if not party:
+        raise HTTPException(status_code=404, detail="Party not found")
+    coi = {"carrier": req.carrier, "policy_number": req.policy_number,
+           "expiry": req.expiry, "gl_limit": req.gl_limit, "wc_limit": req.wc_limit,
+           "document_id": req.document_id, "added_at": datetime.now().isoformat()}
+    party.setdefault("cois", []).append(coi)
+    try:
+        exp = datetime.fromisoformat(req.expiry)
+        party["cleared"] = exp > datetime.now() and party.get("w9") is not False
+    except Exception:
+        pass
+    save_db(db)
+    return {"status": "ok", "coi": coi, "cleared": party.get("cleared")}
+
+@app.get("/compliance/dashboard")
+async def compliance_dashboard_route(current_user: dict = Depends(get_manager_or_above)):
+    """O52: Rolling compliance dashboard."""
+    db = load_db()
+    return {"status": "ok", **_compliance_summary(db)}
+
+@app.get("/templates")
+async def list_templates(current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    return {"status": "ok", "templates": db.get("templates", {})}
+
+@app.post("/templates")
+async def create_template(req: TemplateRequest,
+                           current_user: dict = Depends(get_manager_or_above)):
+    """O48: Document template library."""
+    db = load_db()
+    tid = f"tmpl_{int(datetime.now().timestamp() * 1000)}"
+    tmpl = {"id": tid, "name": req.name, "kind": req.kind, "body": req.body,
+            "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    db.setdefault("templates", {})[tid] = tmpl
+    save_db(db)
+    return {"status": "ok", "template": tmpl}
+
+@app.post("/templates/{template_id}/merge")
+async def merge_template_route(template_id: str, job_id: str,
+                                 current_user: dict = Depends(get_manager_or_above)):
+    """O48: Merge template with job data."""
+    db = load_db()
+    tmpl = db.get("templates", {}).get(template_id)
+    if not tmpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    merged = _merge_template(tmpl["body"], job)
+    return {"status": "ok", "template_id": template_id, "job_id": job_id,
+            "merged_output": merged, "kind": tmpl["kind"]}
+
+@app.get("/sds")
+async def list_sds(current_user: dict = Depends(get_current_user)):
+    """O50: SDS library."""
+    db = load_db()
+    return {"status": "ok", "sds": db.get("sds", {})}
+
+@app.post("/sds")
+async def add_sds(req: SDSRequest, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    sid = f"sds_{int(datetime.now().timestamp() * 1000)}"
+    sds_entry = {"id": sid, "product": req.product, "manufacturer": req.manufacturer,
+                 "document_id": req.document_id, "url": req.url,
+                 "notes": req.notes, "added_by": current_user["email"],
+                 "added_at": datetime.now().isoformat()}
+    db.setdefault("sds", {})[sid] = sds_entry
+    save_db(db)
+    return {"status": "ok", "sds": sds_entry}
+
+@app.get("/employees")
+async def list_employees(current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    return {"status": "ok", "employees": db.get("employees", {})}
+
+@app.post("/employees")
+async def create_employee(req: EmployeeRequest,
+                           current_user: dict = Depends(get_manager_or_above)):
+    """O51: Employee record."""
+    db = load_db()
+    eid = f"emp_{int(datetime.now().timestamp() * 1000)}"
+    emp = {"id": eid, "name": req.name, "email": req.email, "role": req.role,
+           "certs": [], "created_by": current_user["email"],
+           "created_at": datetime.now().isoformat()}
+    db.setdefault("employees", {})[eid] = emp
+    save_db(db)
+    return {"status": "ok", "employee": emp}
+
+@app.post("/employees/{employee_id}/certs")
+async def add_cert(employee_id: str, req: CertRequest,
+                    current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    emp = db.get("employees", {}).get(employee_id)
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    cert = {"cert_type": req.cert_type, "expiry": req.expiry, "notes": req.notes,
+            "added_by": current_user["email"], "added_at": datetime.now().isoformat()}
+    emp.setdefault("certs", []).append(cert)
+    save_db(db)
+    return {"status": "ok", "cert": cert}
+
+@app.post("/job/{job_id}/lien-waiver")
+async def create_lien_waiver(job_id: str, req: LienWaiverRequest,
+                              current_user: dict = Depends(get_manager_or_above)):
+    """O53: Lien waiver generation and tracking."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    waiver_id = f"lw_{int(datetime.now().timestamp() * 1000)}"
+    waiver = {
+        "id": waiver_id, "waiver_type": req.waiver_type,
+        "through_date": req.through_date, "payment_amount": req.payment_amount,
+        "claimant_name": req.claimant_name or job.get("client_name"),
+        "property_address": job.get("address"),
+        "status": "generated", "generated_at": datetime.now().isoformat(),
+        "generated_by": current_user["email"],
+    }
+    job.setdefault("lien_waivers", []).append(waiver)
+    save_db(db)
+    return {"status": "ok", "waiver": waiver}
+
+@app.get("/job/{job_id}/comm-log")
+async def get_comm_log(job_id: str, current_user: dict = Depends(get_current_user)):
+    """O54: Customer communication log."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "job_id": job_id, "comm_log": job.get("comm_log", [])}
+
+@app.post("/job/{job_id}/comm-log")
+async def add_comm_log(job_id: str, req: ContactLogRequest,
+                        current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    entry = {"contact_type": req.contact_type, "summary": req.summary,
+             "contact_with": req.contact_with, "direction": req.direction,
+             "logged_by": current_user["email"], "logged_at": datetime.now().isoformat()}
+    job.setdefault("comm_log", []).append(entry)
+    save_db(db)
+    return {"status": "ok", "entry": entry}
+
+@app.get("/job/{job_id}/permit")
+async def get_permit(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "permit": job.get("permit")}
+
+@app.post("/job/{job_id}/permit")
+async def set_permit(job_id: str, req: PermitRequest,
+                      current_user: dict = Depends(get_manager_or_above)):
+    """O55: Permit tracker."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job["permit"] = {"permit_type": req.permit_type, "permit_number": req.permit_number,
+                     "status": req.status, "jurisdiction": req.jurisdiction,
+                     "issued_date": req.issued_date, "updated_at": datetime.now().isoformat()}
+    save_db(db)
+    return {"status": "ok", "permit": job["permit"]}
+
+@app.post("/job/{job_id}/jha")
+async def create_jha(job_id: str, req: JHARequest,
+                      current_user: dict = Depends(get_current_user)):
+    """O56: Job Hazard Analysis pre-task plan, auto-filled from coating system."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    system = req.coating_system or (job.get("budget") or {}).get("system") or "general"
+    # Default hazards/controls/PPE by system
+    defaults = {
+        "silicone": {
+            "hazards": ["fall", "solvent_vapors", "overspray", "uv_exposure"],
+            "controls": ["anchor_lanyards", "ppe_respirator_half_face", "wind_check_overspray", "sunscreen"],
+            "ppe": ["fall_harness", "half_face_respirator_organic_vapor", "safety_glasses", "gloves"],
+        },
+        "acrylic": {
+            "hazards": ["fall", "skin_irritation", "overspray"],
+            "controls": ["anchor_lanyards", "barrier_cream", "wind_check_overspray"],
+            "ppe": ["fall_harness", "safety_glasses", "gloves", "tyvek_if_windy"],
+        },
+        "default": {
+            "hazards": ["fall", "chemical_exposure", "heat_stress", "overspray"],
+            "controls": ["anchor_lanyards", "ppe_appropriate_for_product", "wind_check", "hydration"],
+            "ppe": ["fall_harness", "respirator", "safety_glasses", "gloves"],
+        }
+    }
+    defs = defaults.get(system.lower(), defaults["default"])
+    jha = {
+        "coating_system": system,
+        "hazards": req.hazards or defs["hazards"],
+        "controls": req.controls or defs["controls"],
+        "ppe_required": req.ppe_required or defs["ppe"],
+        "created_by": current_user["email"], "created_at": datetime.now().isoformat(),
+        "signed_by": [], "status": "active",
+    }
+    job.setdefault("jhas", []).append(jha)
+    save_db(db)
+    return {"status": "ok", "jha": jha}
+
+@app.post("/documents/{doc_id}/index")
+async def index_document(doc_id: str, current_user: dict = Depends(get_current_user)):
+    """I60: Parse and chunk a document for RAG search."""
+    db = load_db()
+    doc = db["documents"].get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    filepath = doc.get("filepath", "")
+    chunks = []
+    try:
+        if filepath.lower().endswith((".txt", ".md", ".csv")):
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        elif filepath.lower().endswith(".pdf"):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(filepath)
+                text = "\n".join(p.extract_text() or "" for p in reader.pages)
+            except ImportError:
+                with open(filepath, "rb") as f:
+                    raw = f.read()
+                text = raw.decode("utf-8", errors="ignore")
+        else:
+            with open(filepath, "rb") as f:
+                raw = f.read()
+            text = raw.decode("utf-8", errors="ignore")
+        # Split into ~500-char chunks with overlap
+        chunk_size = 500
+        overlap = 50
+        for i in range(0, max(len(text), 1), chunk_size - overlap):
+            chunk = text[i:i + chunk_size].strip()
+            if chunk:
+                chunks.append({"text": chunk, "page": i // chunk_size + 1,
+                                "doc_id": doc_id, "filename": doc.get("filename")})
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to index document: {e}"}
+    db.setdefault("doc_chunks", {})[doc_id] = chunks
+    save_db(db)
+    return {"status": "ok", "doc_id": doc_id, "chunks_indexed": len(chunks)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# I-phase — AI, Voice & Mobile-First Field UX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/ai/voice-report")
+async def voice_report(req: VoiceReportRequest,
+                        current_user: dict = Depends(get_current_user)):
+    """I58: Extract structured production log from a voice transcript."""
+    client = get_openai_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="OpenAI not configured")
+    db = load_db()
+    job_hint = ""
+    if req.job_id:
+        job = db["jobs"].get(req.job_id, {})
+        job_hint = f"Job {req.job_id} — {job.get('client_name')} at {job.get('address')}."
+
+    extraction_prompt = f"""Extract a structured production log from this field report transcript.
+{job_hint}
+Today's date: {datetime.now().strftime('%Y-%m-%d')}.
+
+Transcript:
+{req.transcript}
+
+Return JSON with these fields (omit fields not mentioned):
+{{
+  "job_id": "{req.job_id or 'UNKNOWN'}",
+  "date": "YYYY-MM-DD",
+  "crew": "crew member name(s)",
+  "product": "coating product name",
+  "gallons_applied": number,
+  "sqft_coated": number,
+  "wet_mil": [list of wet-mil readings as numbers],
+  "hours_by_type": {{"spray": h, "prep": h, "roller": h}},
+  "weather": {{"temp": F, "rh": percent, "conditions": "string"}},
+  "notes": "any other notes",
+  "coat_seq": coat number (1, 2, etc.)
+}}"""
+    try:
+        resp = _create_completion(client, [{"role": "user", "content": extraction_prompt}],
+                                   max_completion_tokens=800)
+        raw = resp.choices[0].message.content or "{}"
+        import re
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        extracted = json.loads(json_match.group(0)) if json_match else {}
+    except Exception as e:
+        return {"status": "error", "message": f"Extraction failed: {e}", "transcript": req.transcript}
+
+    if not extracted.get("job_id") and req.job_id:
+        extracted["job_id"] = req.job_id
+    extracted["source"] = "voice_report"
+    extracted["needs_confirmation"] = True
+    extracted["transcript"] = req.transcript
+    extracted["extracted_by"] = current_user["email"]
+    extracted["extracted_at"] = datetime.now().isoformat()
+
+    db.setdefault("pending_voice_reports", []).append(extracted)
+    save_db(db)
+    return {"status": "ok", "extracted": extracted,
+            "message": "Review and confirm — POST /production/webhook with PRODUCTION_SECRET to save"}
+
+@app.post("/cron/digest")
+async def send_digest(secret: str = "", current_user: dict = Depends(get_current_user)):
+    """I59: Manual trigger for morning ops digest."""
+    db = load_db()
+    role = current_user.get("role", "user")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    lines = [f"TruAgent Morning Digest — {today}"]
+    if role in ("manager", "super_admin"):
+        # Stalled jobs
+        stalled = [j for j in db["jobs"].values()
+                   if j.get("status") in ("In Progress", "Approved") and j.get("production_logs")
+                   and all((now - datetime.fromisoformat(l.get("date", today))).days > 3
+                            for l in j.get("production_logs", [])[-1:])]
+        if stalled:
+            lines.append(f"\n⚠️ Stalled Jobs ({len(stalled)}):")
+            for j in stalled[:5]:
+                lines.append(f"  - {j.get('client_name')} ({j.get('job_id')})")
+        # Gallons over estimate
+        over = []
+        for j in db["jobs"].values():
+            applied = _applied_gallons_by_product(j)
+            for prod, est in ((j.get("budget") or {}).get("est_gallons") or {}).items():
+                if applied.get(prod, 0) > float(est or 0) * 1.0:
+                    over.append(j.get("client_name"))
+        if over:
+            lines.append(f"\n🚨 Over-gallons ({len(over)}): {', '.join(over[:5])}")
+        # Past-due invoices
+        buckets = _ar_aging_buckets(db)
+        past_due = len(buckets["31_60"]) + len(buckets["61_90"]) + len(buckets["over_90"])
+        if past_due:
+            lines.append(f"\n💰 Past-due invoices: {past_due}")
+        # Unscheduled approved jobs
+        unscheduled = [j for j in db["jobs"].values()
+                       if j.get("workflow_stage") == "Won" and not j.get("schedule_assignments")]
+        if unscheduled:
+            lines.append(f"\n📅 Won but unscheduled: {len(unscheduled)} jobs")
+    else:
+        # Field crew view — today's jobs
+        today_jobs = [j for j in db["jobs"].values()
+                      if any(a.get("date") == today for a in j.get("schedule_assignments", []))]
+        if today_jobs:
+            lines.append(f"\nToday's Jobs ({len(today_jobs)}):")
+            for j in today_jobs:
+                budget = j.get("budget") or {}
+                weather = j.get("weather_status") or {}
+                lines.append(f"  - {j.get('address')} | {budget.get('system')} | "
+                              f"Target mil: {budget.get('dry_mil_target')} | "
+                              f"Weather: {weather.get('verdict', '?')}")
+    body = "\n".join(lines)
+    sent = _send_email_or_log(db, current_user["email"], f"TruAgent Digest {today}", body, "system")
+    return {"status": "ok", "digest": body, "email_status": sent}
+
+@app.get("/jobs/anomalies")
+async def jobs_anomalies(current_user: dict = Depends(get_manager_or_above)):
+    """I62: Anomaly scan — over-budget, stalled, past-due, approved-no-start."""
+    db = load_db()
+    now = datetime.now()
+    flags = []
+    financials = db.get("financials", {})
+    inv_map = financials.get("invoices", {})
+    for jid, job in db.get("jobs", {}).items():
+        budget = job.get("budget") or {}
+        applied = _applied_gallons_by_product(job)
+        for prod, est in (budget.get("est_gallons") or {}).items():
+            if applied.get(prod, 0) > float(est or 0) * 1.05:
+                flags.append({"type": "gallons_overrun", "job_id": jid,
+                               "client": job.get("client_name"), "severity": "high"})
+        logs = job.get("production_logs") or []
+        if logs and job.get("status") in ("In Progress",):
+            last = logs[-1]
+            try:
+                last_dt = datetime.fromisoformat(last.get("date") or "")
+                if (now - last_dt).days > 5:
+                    flags.append({"type": "stalled", "job_id": jid,
+                                  "client": job.get("client_name"),
+                                  "days_stalled": (now - last_dt).days, "severity": "medium"})
+            except Exception:
+                pass
+        if job.get("workflow_stage") == "Won" and not logs:
+            flags.append({"type": "approved_no_start", "job_id": jid,
+                          "client": job.get("client_name"), "severity": "low"})
+        for inv_id in job.get("invoices", []):
+            inv = inv_map.get(inv_id, {})
+            if inv.get("status") not in ("paid", "cancelled"):
+                try:
+                    due = datetime.fromisoformat(inv.get("due_date") or inv.get("date") or "")
+                    if (now - due).days > 30:
+                        flags.append({"type": "past_due_invoice", "job_id": jid,
+                                      "invoice_id": inv_id, "days_past_due": (now - due).days,
+                                      "severity": "high"})
+                except Exception:
+                    pass
+        # Margin drop
+        live = _job_margin_live(db, job)
+        quoted = float(budget.get("quoted_margin") or 0)
+        if live is not None and quoted > 0 and live < quoted - 5:
+            flags.append({"type": "margin_drop", "job_id": jid,
+                          "client": job.get("client_name"),
+                          "quoted": quoted, "live": live, "severity": "high"})
+    return {"status": "ok", "anomaly_flags": flags, "count": len(flags)}
+
 
 if __name__ == "__main__":
     import uvicorn
