@@ -140,7 +140,10 @@ Three new docs in `docs/`, generated from a multi-agent analysis and adversarial
    - office@trulineroofing.com / office123 → manager
    - fieldcrew@trulineroofing.com / roof123 → field crew
 6. **Test voice input** on mobile (tap mic, speak, check transcription accuracy)
-7. **Persistent storage** — ⏳ CODE DONE (option 1: Railway volume), awaiting Fred's Railway action. The app now reads a `DATA_DIR` env var; `db.json` + `documents/` live there. Default is the project folder (so local dev is unchanged and it's still ephemeral on Railway *until set*). **To finish (Fred, in Railway):** (a) the TruAgent service → **Volumes** → add a volume, mount path `/data`; (b) **Variables** → add `DATA_DIR=/data`; (c) redeploy. From then on, data survives every deploy. Do this in the SAME deploy that ships the 2026-06-09 staged changes. (Strategic alternative for later: move storage to Supabase to match the sibling apps — see `docs/APP_INTEGRATION_ROADMAP.md`.)
+7. **Persistent storage** — ✅ DONE & DEPLOYED 2026-06-09. Railway volume `truagent-volume-pBwm` mounted at `/data` on the **valiant-generosity → TruAgent → production** service (note: there's a second, empty "TruAgent" service in project `earnest-spirit` with no domain — ignore it). `DATA_DIR=/data` set. Commit `f26c3d0` pushed and live; deploy verified (root 200, webhook health JSON, `updateJobStage` marker in deployed app.js). Data now survives redeploys. (Strategic alternative for later: move to Supabase to match the sibling apps — see `docs/APP_INTEGRATION_ROADMAP.md`.)
+
+### Next build session
+`docs/NEXT_INSTANCE_BUILD_PLAN.md` + `docs/BUILD_PROGRESS.md` define the approved next-phase build: **63 dependency-ordered features** (all MVP + all fast-follow + all of accounting/job-cost/finance + warranty-registration + Delta progress sync + contract e-sign routing). Section 0 of the plan is a paste-ready kickoff prompt for a fresh instance. Access tokens for Railway/Vercel/Supabase live in `C:\Users\rjfla\.app-secrets.env` (Railway CLI authed, Vercel MCP connected, Supabase MCP scoped to the "Fred's Estimator" org only).
 
 ---
 
