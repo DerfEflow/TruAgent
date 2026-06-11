@@ -2347,12 +2347,14 @@ async def leads_webhook(payload: LeadWebhook):
     if payload.secret != LEADS_SECRET:
         raise HTTPException(status_code=403, detail="Invalid leads webhook secret")
     db = load_db()
-    # Dedupe by address+name
+    # Dedupe by address+name. Stored records may hold None for either field
+    # (a None address once poisoned this loop and 500'd every later lead),
+    # so guard both sides with `or ""`.
     address = (payload.address or "").strip().lower()
     client = (payload.client_name or "").strip().lower()
     for oid, opp in db.get("opportunities", {}).items():
-        if (opp.get("address", "").lower() == address and
-                opp.get("client_name", "").lower() == client and address):
+        if ((opp.get("address") or "").lower() == address and
+                (opp.get("client_name") or "").lower() == client and address):
             opp["last_seen"] = datetime.now().isoformat()
             save_db(db)
             return {"status": "ok", "message": "Duplicate lead — opportunity updated",
