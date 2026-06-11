@@ -693,10 +693,52 @@ def _gather_attachments(db: dict, document_ids) -> list:
     return attachments
 
 
+def _queue_email(db: dict, payload: dict, reason: str) -> dict:
+    """Park an email in the outbox so it is never lost. Flushed by the
+    flush_outbox cron task (or POST /outbox/flush) once EMAIL_WEBHOOK_URL is
+    configured. Persists immediately."""
+    outbox = db.setdefault("outbox", [])
+    entry = {
+        "id": f"out_{int(datetime.now().timestamp() * 1000)}_{len(outbox)}",
+        "payload": payload,
+        "status": "queued",
+        "queued_reason": reason,
+        "attempts": 0,
+        "queued_at": datetime.now().isoformat(),
+        "last_error": None,
+    }
+    outbox.append(entry)
+    save_db(db)
+    return entry
+
+
+def _email_dispatch(db: dict, payload: dict) -> dict:
+    """Single choke point for outbound email. Sends through the Zapier
+    EMAIL_WEBHOOK_URL when configured; otherwise (or on failure) queues the
+    email in the outbox instead of dropping it."""
+    to = payload.get("to")
+    if not EMAIL_WEBHOOK_URL:
+        entry = _queue_email(db, payload, "email webhook not configured")
+        return {"status": "queued",
+                "message": (f"Email to {to} saved to the outbox ({entry['id']}). "
+                            "It will send automatically once the email Zap "
+                            "(EMAIL_WEBHOOK_URL) is configured.")}
+    try:
+        import requests
+        resp = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
+        resp.raise_for_status()
+        return {"status": "ok", "message": f"Email sent to {to}"}
+    except Exception as e:
+        entry = _queue_email(db, payload, f"send failed: {e}")
+        entry["attempts"] = 1
+        entry["last_error"] = str(e)
+        save_db(db)
+        return {"status": "queued",
+                "message": f"Send to {to} failed ({e}); email queued for retry ({entry['id']})."}
+
+
 def _op_send_email(db: dict, to: Optional[str], subject: str, body: str,
                    html: Optional[str], document_ids, user_email: str) -> dict:
-    if not EMAIL_WEBHOOK_URL:
-        return {"status": "error", "message": "Email service not configured"}
     if not to:
         return {"status": "error", "message": "A recipient ('to') is required"}
     attachments = _gather_attachments(db, document_ids)
@@ -705,13 +747,7 @@ def _op_send_email(db: dict, to: Optional[str], subject: str, body: str,
         "attachments": attachments or None,
         "sent_by": user_email, "sent_at": datetime.now().isoformat(),
     }
-    try:
-        import requests
-        resp = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
-        resp.raise_for_status()
-        return {"status": "ok", "message": f"Email sent to {to}"}
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to send email: {e}"}
+    return _email_dispatch(db, payload)
 
 
 def _op_send_sms(to: Optional[str], message: str, user_email: str) -> dict:
@@ -1092,17 +1128,13 @@ def _compliance_summary(db: dict) -> dict:
 
 
 def _send_email_or_log(db: dict, to: str, subject: str, body: str, sent_by: str) -> str:
-    """Best-effort email send; returns 'sent', 'not configured', or error."""
-    if not EMAIL_WEBHOOK_URL:
-        return "not configured"
-    try:
-        import requests
-        requests.post(EMAIL_WEBHOOK_URL, json={"to": to, "subject": subject, "body": body,
-                                               "sent_by": sent_by, "sent_at": datetime.now().isoformat()},
-                      timeout=10).raise_for_status()
+    """Best-effort email send; returns 'sent' or a 'queued: …' explanation.
+    Unsendable emails are parked in the outbox, never dropped."""
+    result = _email_dispatch(db, {"to": to, "subject": subject, "body": body,
+                                  "sent_by": sent_by, "sent_at": datetime.now().isoformat()})
+    if result["status"] == "ok":
         return "sent"
-    except Exception as e:
-        return f"error: {e}"
+    return f"queued: {result['message']}"
 
 
 # OpenAI tool/function specs. Financial tools are exposed only to manager+.
@@ -1784,53 +1816,15 @@ async def get_job_financials(job_id: str, current_user: dict = Depends(get_manag
 
 @app.post("/send-email")
 async def send_email(email: EmailMessage, current_user: dict = Depends(get_current_user)):
-    """Send email via Zapier webhook integration (supports Gmail, SendGrid, etc.)"""
-    
-    if not EMAIL_WEBHOOK_URL:
-        raise HTTPException(status_code=503, detail="Email service not configured")
-    
+    """Send email via Zapier webhook integration (supports Gmail, SendGrid, etc.).
+    When the webhook is not configured (or the send fails), the email is queued
+    in the outbox instead of being dropped."""
     db = load_db()
-    
-    attachments = []
-    if email.document_ids:
-        for doc_id in email.document_ids:
-            if doc_id in db["documents"]:
-                doc = db["documents"][doc_id]
-                try:
-                    import base64
-                    with open(doc["filepath"], "rb") as f:
-                        file_content = f.read()
-                        base64_content = base64.b64encode(file_content).decode()
-                        attachments.append({
-                            "filename": doc["filename"],
-                            "content": base64_content,
-                            "contentType": "application/octet-stream"
-                        })
-                except Exception as e:
-                    pass
-    
-    payload = {
-        "to": email.to,
-        "subject": email.subject,
-        "body": email.body,
-        "html": email.html,
-        "attachments": attachments if attachments else None,
-        "sent_by": current_user["email"],
-        "sent_at": datetime.now().isoformat()
-    }
-    
-    try:
-        import requests
-        response = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        
-        return {
-            "status": "ok",
-            "message": f"Email sent to {email.to}",
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+    result = _op_send_email(db, email.to, email.subject, email.body,
+                            email.html, email.document_ids, current_user["email"])
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return {**result, "timestamp": datetime.now().isoformat()}
 
 @app.post("/send-sms")
 async def send_sms(sms: SMSMessage, current_user: dict = Depends(get_current_user)):
@@ -1858,6 +1852,54 @@ async def send_sms(sms: SMSMessage, current_user: dict = Depends(get_current_use
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
+
+@app.get("/outbox")
+async def get_outbox(current_user: dict = Depends(get_manager_or_above)):
+    """Queued/sent outbound emails (parked when the email Zap is missing)."""
+    db = load_db()
+    entries = []
+    for e in db.get("outbox", []):
+        p = e.get("payload", {})
+        entries.append({
+            "id": e.get("id"), "status": e.get("status"),
+            "to": p.get("to"), "subject": p.get("subject"),
+            "queued_at": e.get("queued_at"), "queued_reason": e.get("queued_reason"),
+            "attempts": e.get("attempts", 0), "last_error": e.get("last_error"),
+            "sent_at": e.get("sent_at"),
+        })
+    return {"status": "ok", "outbox": entries,
+            "email_webhook_configured": bool(EMAIL_WEBHOOK_URL)}
+
+
+@app.post("/outbox/flush")
+async def flush_outbox(current_user: dict = Depends(get_manager_or_above)):
+    """Attempt delivery of every queued outbox email now."""
+    return {"status": "ok", "result": _flush_outbox_once()}
+
+
+def _flush_outbox_once() -> str:
+    if not EMAIL_WEBHOOK_URL:
+        return "email webhook not configured — outbox left untouched"
+    db = load_db()
+    sent = failed = 0
+    import requests
+    for entry in db.get("outbox", []):
+        if entry.get("status") != "queued":
+            continue
+        try:
+            requests.post(EMAIL_WEBHOOK_URL, json=entry["payload"], timeout=10).raise_for_status()
+            entry["status"] = "sent"
+            entry["sent_at"] = datetime.now().isoformat()
+            sent += 1
+        except Exception as e:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["last_error"] = str(e)
+            if entry["attempts"] >= 20:
+                entry["status"] = "dead"
+            failed += 1
+    save_db(db)
+    return f"outbox flush: {sent} sent, {failed} failed"
+
 
 @app.post("/documents/upload")
 async def upload_document(
@@ -2026,50 +2068,12 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
         return {"status": "ok", "documents": db["documents"]}
     
     elif action.action == "send_email":
-        to = action.parameters.get("to")
-        subject = action.parameters.get("subject")
-        body = action.parameters.get("body")
-        html = action.parameters.get("html")
-        doc_ids = action.parameters.get("document_ids", [])
-        
-        if not EMAIL_WEBHOOK_URL:
-            return {"status": "error", "message": "Email service not configured"}
-        
-        attachments = []
-        if doc_ids:
-            for doc_id in doc_ids:
-                if doc_id in db["documents"]:
-                    doc = db["documents"][doc_id]
-                    try:
-                        import base64
-                        with open(doc["filepath"], "rb") as f:
-                            file_content = f.read()
-                            base64_content = base64.b64encode(file_content).decode()
-                            attachments.append({
-                                "filename": doc["filename"],
-                                "content": base64_content,
-                                "contentType": "application/octet-stream"
-                            })
-                    except:
-                        pass
-        
-        payload = {
-            "to": to,
-            "subject": subject,
-            "body": body,
-            "html": html,
-            "attachments": attachments if attachments else None,
-            "sent_by": current_user["email"],
-            "sent_at": datetime.now().isoformat()
-        }
-        
-        try:
-            import requests
-            response = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
-            response.raise_for_status()
-            return {"status": "ok", "message": f"Email sent to {to}"}
-        except Exception as e:
-            return {"status": "error", "message": f"Failed to send email: {str(e)}"}
+        return _op_send_email(db, action.parameters.get("to"),
+                              action.parameters.get("subject", ""),
+                              action.parameters.get("body", ""),
+                              action.parameters.get("html"),
+                              action.parameters.get("document_ids", []),
+                              current_user["email"])
     
     elif action.action == "send_sms":
         to = action.parameters.get("to")
@@ -4141,6 +4145,7 @@ _CRON_TASKS["compliance_scan"] = _cron_compliance_scan   # O52 rollup
 _CRON_TASKS["coi_scan"] = _cron_compliance_scan          # O46
 _CRON_TASKS["cert_scan"] = _cron_compliance_scan         # O51
 _CRON_TASKS["anomaly_scan"] = _cron_anomaly_scan         # I62
+_CRON_TASKS["flush_outbox"] = _flush_outbox_once         # outbox email retry
 
 
 if __name__ == "__main__":
