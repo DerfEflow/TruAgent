@@ -4005,8 +4005,29 @@ Return JSON with these fields (omit fields not mentioned):
             "message": "Review and confirm — POST /production/webhook with PRODUCTION_SECRET to save"}
 
 @app.post("/cron/digest")
-async def send_digest(secret: str = "", current_user: dict = Depends(get_current_user)):
-    """I59: Manual trigger for morning ops digest."""
+async def send_digest(request: Request, secret: str = ""):
+    """I59: Morning ops digest. Two auth modes: a logged-in user's JWT (digest
+    goes to that user, scoped to their role), or the CRON_SECRET as ?secret=
+    (scheduled callers like Railway cron / Zapier Schedule — digest goes to the
+    super admin)."""
+    current_user = None
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        try:
+            payload = jwt.decode(auth[7:], SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("sub")
+            if isinstance(email, str):
+                current_user = load_db()["users"].get(email)
+        except JWTError:
+            current_user = None
+    if current_user is None:
+        if secret and secret == CRON_SECRET:
+            db_users = load_db().get("users", {})
+            admin_email = next((e for e, u in db_users.items()
+                                if u.get("role") == "super_admin"), "fred@trulineroofing.com")
+            current_user = {"email": admin_email, "role": "super_admin"}
+        else:
+            raise HTTPException(status_code=401, detail="Not authenticated")
     db = load_db()
     role = current_user.get("role", "user")
     now = datetime.now()
@@ -4024,7 +4045,8 @@ async def send_digest(secret: str = "", current_user: dict = Depends(get_current
     if role in ("manager", "super_admin"):
         # Stalled jobs (guarded against malformed log dates)
         stalled = [j for j in db["jobs"].values()
-                   if j.get("status") in ("In Progress", "Approved") and j.get("production_logs")
+                   if j.get("status") in ("In Progress", "In Production", "Approved")
+                   and j.get("production_logs")
                    and (_last_log_age_days(j) or 0) > 3]
         if stalled:
             lines.append(f"\n⚠️ Stalled Jobs ({len(stalled)}):")
@@ -4079,7 +4101,7 @@ def _detect_anomalies(db: dict) -> list:
                 flags.append({"type": "gallons_overrun", "job_id": jid,
                                "client": job.get("client_name"), "severity": "high"})
         logs = job.get("production_logs") or []
-        if logs and job.get("status") in ("In Progress",):
+        if logs and job.get("status") in ("In Progress", "In Production"):
             last = logs[-1]
             try:
                 last_dt = datetime.fromisoformat(last.get("date") or "")
