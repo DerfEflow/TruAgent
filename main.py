@@ -2347,12 +2347,30 @@ async def leads_webhook(payload: LeadWebhook):
     if payload.secret != LEADS_SECRET:
         raise HTTPException(status_code=403, detail="Invalid leads webhook secret")
     db = load_db()
-    # Dedupe by address+name. Stored records may hold None for either field
-    # (a None address once poisoned this loop and 500'd every later lead),
+    opportunities = db.get("opportunities", {})
+
+    # Dedupe pass 1: stable cross-system key. Sources like Dominate send
+    # data.dominate_brand_id (their Brand row id) and carry no address, so the
+    # name+address check below never catches their repeats — re-running a
+    # backfill would duplicate every client. Match on the source id first.
+    # str() both sides so an int id and a stringified id still compare equal.
+    brand_id = (payload.data or {}).get("dominate_brand_id")
+    if brand_id is not None:
+        for oid, opp in opportunities.items():
+            if opp.get("dominate_brand_id") is not None and \
+                    str(opp.get("dominate_brand_id")) == str(brand_id):
+                opp["last_seen"] = datetime.now().isoformat()
+                save_db(db)
+                return {"status": "ok",
+                        "message": "Duplicate lead — opportunity updated",
+                        "opportunity_id": oid, "duplicate": True}
+
+    # Dedupe pass 2: by address+name. Stored records may hold None for either
+    # field (a None address once poisoned this loop and 500'd every later lead),
     # so guard both sides with `or ""`.
     address = (payload.address or "").strip().lower()
     client = (payload.client_name or "").strip().lower()
-    for oid, opp in db.get("opportunities", {}).items():
+    for oid, opp in opportunities.items():
         if ((opp.get("address") or "").lower() == address and
                 (opp.get("client_name") or "").lower() == client and address):
             opp["last_seen"] = datetime.now().isoformat()
@@ -3216,6 +3234,20 @@ async def advance_opp_stage(opportunity_id: str, req: PipelineStageUpdate,
                              "updated_at": datetime.now().isoformat()})
     save_db(db)
     return {"status": "ok", "opportunity_id": opportunity_id, "stage": req.stage}
+
+@app.delete("/pipeline/{opportunity_id}")
+async def delete_opportunity(opportunity_id: str,
+                             current_user: dict = Depends(get_super_admin)):
+    """Delete an opportunity. Super-admin only — used to clear test/duplicate
+    leads that the lead door cannot otherwise remove."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    del db["opportunities"][opportunity_id]
+    save_db(db)
+    return {"status": "ok", "message": "Opportunity deleted",
+            "opportunity_id": opportunity_id}
 
 @app.post("/pipeline/{opportunity_id}/cadence")
 async def set_cadence(opportunity_id: str, req: ContactLogRequest,
