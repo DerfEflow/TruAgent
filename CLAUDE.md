@@ -16,10 +16,12 @@ python -m venv .venv
 Then open http://localhost:5000 (set `PORT` in `.env` to use another port — local
 review currently uses 5050 because Coating Log occupies 5000).
 
-Demo logins (do not change during the build):
-- Super Admin: fred@trulineroofing.com / truline2024
-- Manager: office@trulineroofing.com / office123
-- User: fieldcrew@trulineroofing.com / roof123
+Logins (rotated 2026-06-14, sec-02): the old public demo passwords
+(truline2024 / office123 / roof123) are retired. Strong replacements live in the
+git-ignored `ROTATED-LOGINS-2026-06-14.txt` (not committed). Roles unchanged:
+- Super Admin: fred@trulineroofing.com
+- Manager: office@trulineroofing.com
+- User: fieldcrew@trulineroofing.com
 
 @docs/architecture.md
 @docs/data_model.md

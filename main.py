@@ -49,22 +49,40 @@ SECRET_KEY = os.getenv("SESSION_SECRET", secrets.token_urlsafe(32))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
-ZAPIER_SECRET = os.getenv("ZAPIER_SECRET", "change_this_secret_in_production")
+# Fail-closed door secrets (sec-01 / G11). A missing or still-default inbound door
+# secret must NOT fall back to a publicly-known placeholder that any caller could
+# send. Instead it resolves to an unguessable random value, so each door's
+# `provided != SECRET` check rejects EVERY request until a real secret is set. The
+# app still boots (the door just stays dormant) and we warn loudly so the operator
+# knows which doors are disabled.
+_DISABLED_DOORS: List[str] = []
+
+def _door_secret(name: str, placeholder: str) -> str:
+    val = os.getenv(name)
+    if val and val != placeholder:
+        return val
+    _DISABLED_DOORS.append(name)
+    print(f"[SECURITY] {name} is unset or still the public placeholder -> door "
+          f"DISABLED (rejecting all requests). Set a strong {name} in the "
+          f"environment to enable this door.")
+    return "DISABLED_" + secrets.token_urlsafe(32)
+
+ZAPIER_SECRET = _door_secret("ZAPIER_SECRET", "change_this_secret_in_production")
 ROOFR_WEBHOOK_URL = os.getenv("ROOFR_WEBHOOK_URL", "")
-QUICKBOOKS_SECRET = os.getenv("QUICKBOOKS_SECRET", "change_this_in_production")
+QUICKBOOKS_SECRET = _door_secret("QUICKBOOKS_SECRET", "change_this_in_production")
 EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")
 SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
 
 # Inbound webhook secrets for the three sibling-app doors (F1/F2/F3) and the
 # scheduler endpoint (F4). Each is validated server-side on every request.
-ALPHA_SECRET = os.getenv("ALPHA_SECRET", "change_alpha_secret_in_production")
-PRODUCTION_SECRET = os.getenv("PRODUCTION_SECRET", "change_production_secret_in_production")
-LEADS_SECRET = os.getenv("LEADS_SECRET", "change_leads_secret_in_production")
-CRON_SECRET = os.getenv("CRON_SECRET", "change_cron_secret_in_production")
+ALPHA_SECRET = _door_secret("ALPHA_SECRET", "change_alpha_secret_in_production")
+PRODUCTION_SECRET = _door_secret("PRODUCTION_SECRET", "change_production_secret_in_production")
+LEADS_SECRET = _door_secret("LEADS_SECRET", "change_leads_secret_in_production")
+CRON_SECRET = _door_secret("CRON_SECRET", "change_cron_secret_in_production")
 ESIGN_WEBHOOK_URL = os.getenv("ESIGN_WEBHOOK_URL", "")
 # Shared secret for the inbound e-sign callback (S33/O57). Separate from the
 # outbound ESIGN_WEBHOOK_URL above.
-ESIGN_SECRET = os.getenv("ESIGN_SECRET", "change_esign_secret_in_production")
+ESIGN_SECRET = _door_secret("ESIGN_SECRET", "change_esign_secret_in_production")
 
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is the id confirmed working on this account; a known-good fallback is
@@ -137,8 +155,26 @@ _PREP_ITEMS_BY_SUBSTRATE = {
     "default":  ["clean", "ponding_addressed", "seams_sealed", "primer"],
 }
 
+# Rotated 2026-06-14 (sec-02): the public demo passwords (truline2024 / roof123 /
+# office123) are retired. Their strong replacements live ONLY in the operator's
+# local ROTATED-LOGINS-2026-06-14.txt (git-ignored) - never in code or docs. The
+# values below are the sha256 hashes of those strong passwords. On load, any of
+# these three seeded users still carrying the OLD public demo hash is auto-rotated
+# to the new hash, so the live db.json is upgraded on next boot without a lockout.
+_ROTATED_USER_HASHES = {
+    "fred@trulineroofing.com": "1e9d9281902c5af80762106680d32c9363b0de82e57aa114489d80e6c00bd984",
+    "office@trulineroofing.com": "40525bdf88e60aef331d7b7fd78a0da73eefe030f96c7b3f353a3701759fe827",
+    "fieldcrew@trulineroofing.com": "f4d81178cc1eafa56f5f4793e75544ac18653f33b47044691aea2508a2fe0782",
+}
+_RETIRED_DEMO_HASHES = {
+    "fred@trulineroofing.com": hashlib.sha256(b"truline2024").hexdigest(),
+    "office@trulineroofing.com": hashlib.sha256(b"office123").hexdigest(),
+    "fieldcrew@trulineroofing.com": hashlib.sha256(b"roof123").hexdigest(),
+}
+
+
 def _seed_db() -> dict:
-    """A fresh database seeded with the three demo logins and all collections."""
+    """A fresh database seeded with the three (rotated) logins and all collections."""
     return {
         "jobs": {},
         "documents": {},
@@ -157,17 +193,17 @@ def _seed_db() -> dict:
         "users": {
             "fred@trulineroofing.com": {
                 "email": "fred@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"truline2024").hexdigest(),
+                "password_hash": _ROTATED_USER_HASHES["fred@trulineroofing.com"],
                 "role": "super_admin"
             },
             "fieldcrew@trulineroofing.com": {
                 "email": "fieldcrew@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"roof123").hexdigest(),
+                "password_hash": _ROTATED_USER_HASHES["fieldcrew@trulineroofing.com"],
                 "role": "user"
             },
             "office@trulineroofing.com": {
                 "email": "office@trulineroofing.com",
-                "password_hash": hashlib.sha256(b"office123").hexdigest(),
+                "password_hash": _ROTATED_USER_HASHES["office@trulineroofing.com"],
                 "role": "manager"
             }
         }
@@ -204,6 +240,15 @@ def load_db():
                 del user_data["is_admin"]
                 needs_migration = True
         
+        # Auto-rotate any seeded user still on a retired public demo password
+        # (sec-02) to its strong replacement, so the live db.json is upgraded
+        # without a lockout. Idempotent: only fires while the old hash is present.
+        for _email, _retired_hash in _RETIRED_DEMO_HASHES.items():
+            _u = db.get("users", {}).get(_email)
+            if _u and _u.get("password_hash") == _retired_hash:
+                _u["password_hash"] = _ROTATED_USER_HASHES[_email]
+                needs_migration = True
+
         for _key in ("weather_profiles", "templates", "sds", "employees",
                      "parties", "opportunities", "equipment", "doc_chunks"):
             if _key not in db:

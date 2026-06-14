@@ -52,3 +52,6 @@ Thumbs.db
 server.out.log
 server.err.log
 *.log
+
+# Rotated login credentials (sec-02) - local only, never commit
+ROTATED-LOGINS-*.txt

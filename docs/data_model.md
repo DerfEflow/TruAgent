@@ -31,10 +31,11 @@ Keyed by email.
 }
 ```
 
-Seeded demo logins (do not change during the build — see ROADMAP "pre-launch"):
-- `fred@trulineroofing.com` / `truline2024` → super_admin
-- `office@trulineroofing.com` / `office123` → manager
-- `fieldcrew@trulineroofing.com` / `roof123` → user
+Seeded logins (passwords rotated 2026-06-14, sec-02 — old public demo passwords
+retired; strong values in the git-ignored `ROTATED-LOGINS-2026-06-14.txt`):
+- `fred@trulineroofing.com` → super_admin
+- `office@trulineroofing.com` → manager
+- `fieldcrew@trulineroofing.com` → user
 
 ## jobs
 
