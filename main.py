@@ -2349,6 +2349,22 @@ async def production_webhook(payload: ProductionLogWebhook):
     job = db["jobs"].get(payload.job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {payload.job_id!r} not found")
+    # Idempotency (dash-02): TruHub stamps each Delta daily log with a
+    # [delta_log:<uuid>] marker in notes. If a log carrying this exact marker is
+    # already present, this is a retry / re-fire being replayed - skip the append
+    # so a day's log is not doubled. TruHub dedupes on its side too; this makes the
+    # door self-protecting against any caller that re-posts the same log.
+    import re
+    _marker_match = re.search(r"\[delta_log:[0-9a-fA-F-]+\]", payload.notes or "")
+    if _marker_match:
+        _marker = _marker_match.group(0)
+        for _existing in job.get("production_logs", []):
+            if _marker in (_existing.get("notes") or ""):
+                return {"status": "ok", "job_id": payload.job_id,
+                        "pct_complete": job.get("pct_complete"),
+                        "applied_gallons": _applied_gallons_by_product(job),
+                        "duplicate": True,
+                        "message": "Production log already recorded (idempotent skip)"}
     log_entry = {
         "date": payload.date,
         "crew": payload.crew,
