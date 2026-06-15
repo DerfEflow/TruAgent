@@ -671,6 +671,41 @@ def _sync_to_roofr(payload: dict) -> str:
         return f"sync failed: {e}"
 
 
+def _outbound_roofr_id(job: dict, internal_job_id: Optional[str]) -> Optional[str]:
+    """The id Roofr knows this job by. Prefer a stored roofr_job_id cross-reference
+    (set when a Roofr/Zapier job is linked to a suite job); fall back to the
+    internal id so Roofr-originated jobs (already keyed by their Roofr id) keep
+    working. Without this, outbound status/note pushes for suite jobs go out under
+    the internal 'alpha-<uuid>' id Roofr never saw, so they match no Roofr record."""
+    if isinstance(job, dict):
+        data = job.get("data") or {}
+        xref = job.get("roofr_job_id") or data.get("roofr_job_id")
+        if xref:
+            return str(xref)
+    return internal_job_id
+
+
+def _resolve_job_id(db: dict, external_id) -> Optional[str]:
+    """Map an id from an external system (QuickBooks/Roofr) to the internal job
+    key. Returns the id directly if it already IS a job key; otherwise finds a job
+    whose stored cross-ref (roofr_job_id / qb_job_id, at job root or under data)
+    equals it. Returns None if nothing matches, so a real invoice is stored
+    unlinked rather than mis-attached to the wrong job."""
+    if not external_id:
+        return None
+    if external_id in db.get("jobs", {}):
+        return external_id
+    ext = str(external_id)
+    for jid, job in db.get("jobs", {}).items():
+        if not isinstance(job, dict):
+            continue
+        data = job.get("data") or {}
+        for key in ("roofr_job_id", "qb_job_id"):
+            if str(job.get(key) or data.get(key) or "") == ext:
+                return jid
+    return None
+
+
 def _op_update_job_status(db: dict, job_id: Optional[str], status: Optional[str],
                           workflow_stage: Optional[str], user_email: str) -> dict:
     job = db["jobs"].get(job_id) if job_id else None
@@ -682,7 +717,8 @@ def _op_update_job_status(db: dict, job_id: Optional[str], status: Optional[str]
         job["workflow_stage"] = workflow_stage
     save_db(db)
     sync = _sync_to_roofr({
-        "job_id": job_id,
+        "job_id": _outbound_roofr_id(job, job_id),
+        "truagent_job_id": job_id,
         "status": job.get("status"),
         "workflow_stage": job.get("workflow_stage"),
         "client_name": job.get("client_name"),
@@ -709,7 +745,8 @@ def _op_add_job_note(db: dict, job_id: Optional[str], note: Optional[str],
     job["notes"] = notes
     save_db(db)
     sync = _sync_to_roofr({
-        "job_id": job_id,
+        "job_id": _outbound_roofr_id(job, job_id),
+        "truagent_job_id": job_id,
         "new_note": note,
         "client_name": job.get("client_name"),
         "address": job.get("address"),
@@ -1776,12 +1813,18 @@ async def quickbooks_webhook(webhook: QuickBooksWebhook):
             invoice_data.update(webhook.data)
         
         db["financials"]["invoices"][webhook.transaction_id] = invoice_data
-        
-        if webhook.job_id and webhook.job_id in db["jobs"]:
-            if "invoices" not in db["jobs"][webhook.job_id]:
-                db["jobs"][webhook.job_id]["invoices"] = []
-            if webhook.transaction_id not in db["jobs"][webhook.job_id]["invoices"]:
-                db["jobs"][webhook.job_id]["invoices"].append(webhook.transaction_id)
+
+        # Resolve the QB-provided job id against internal keys AND any stored
+        # roofr_job_id/qb_job_id cross-ref, so a real invoice attaches to the suite
+        # job ('alpha-<uuid>') instead of landing unlinked (QB sends Roofr's/QB's
+        # own job number, which never equals the internal key).
+        linked_id = _resolve_job_id(db, webhook.job_id)
+        if linked_id:
+            invoice_data["job_id"] = linked_id
+            linked_job = db["jobs"][linked_id]
+            linked_job.setdefault("invoices", [])
+            if webhook.transaction_id not in linked_job["invoices"]:
+                linked_job["invoices"].append(webhook.transaction_id)
     
     elif webhook.transaction_type == "expense":
         if "expenses" not in db["financials"]:
@@ -1802,12 +1845,16 @@ async def quickbooks_webhook(webhook: QuickBooksWebhook):
             expense_data.update(webhook.data)
         
         db["financials"]["expenses"][webhook.transaction_id] = expense_data
-        
-        if webhook.job_id and webhook.job_id in db["jobs"]:
-            if "expenses" not in db["jobs"][webhook.job_id]:
-                db["jobs"][webhook.job_id]["expenses"] = []
-            if webhook.transaction_id not in db["jobs"][webhook.job_id]["expenses"]:
-                db["jobs"][webhook.job_id]["expenses"].append(webhook.transaction_id)
+
+        # Same cross-ref resolution as invoices: attach real expenses to the suite
+        # job even though QB sends a job number that isn't the internal key.
+        linked_id = _resolve_job_id(db, webhook.job_id)
+        if linked_id:
+            expense_data["job_id"] = linked_id
+            linked_job = db["jobs"][linked_id]
+            linked_job.setdefault("expenses", [])
+            if webhook.transaction_id not in linked_job["expenses"]:
+                linked_job["expenses"].append(webhook.transaction_id)
     
     else:
         raise HTTPException(status_code=400, detail="Invalid transaction_type. Must be 'invoice' or 'expense'")
