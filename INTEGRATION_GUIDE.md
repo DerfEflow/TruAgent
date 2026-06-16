@@ -1,6 +1,6 @@
 # Truline Roofing AI Agent - Complete Integration Guide
 
-> **Hosting note:** This app now runs on **Railway** (not Replit). Wherever this guide says "Replit Secrets," set the value in **Railway → your service → Variables** instead. The live base URL is `https://truagent-production.up.railway.app`. For the current, confirmed Roofr field mappings see `docs/handoff.md`.
+> **Hosting note:** This app runs on **Railway**. Set all secrets and webhook URLs in **Railway → the TruAgent service → Variables**. The live base URL is `https://truagent-production.up.railway.app`. For the current, confirmed Roofr field mappings see `docs/handoff.md`. For step-by-step QuickBooks setup, see `docs/CONNECT_QUICKBOOKS.md`.
 
 ## Overview
 
@@ -60,9 +60,9 @@ See ZAPIER_QUICKSTART.md for detailed setup instructions.
 4. Copy the webhook URL Zapier provides
 
 #### Step 2: Configure Environment Variable
-1. Go to your Replit project
-2. Open Secrets (lock icon in left sidebar)
-3. Add new secret:
+1. Go to Railway (railway.app) → project **valiant-generosity** → the **TruAgent** service
+2. Open the **Variables** tab
+3. Add a variable:
    - Key: `ROOFR_WEBHOOK_URL`
    - Value: [Paste the webhook URL from Step 1]
 
@@ -100,9 +100,9 @@ See ZAPIER_QUICKSTART.md for detailed setup instructions.
 https://truagent-production.up.railway.app/quickbooks/webhook
 ```
 
-**Secret Key** (Configure in Replit Secrets):
+**Secret Key** (Railway → TruAgent service → Variables — **already set**):
 - Key: `QUICKBOOKS_SECRET`
-- Value: [Create a strong random secret]
+- Value: already configured; **copy the existing value**, do not create a new one. For full step-by-step QuickBooks setup see `docs/CONNECT_QUICKBOOKS.md`.
 
 ### 2.1 Invoice Import Setup
 
@@ -213,9 +213,9 @@ https://truagent-production.up.railway.app/send-email
 4. Copy the webhook URL
 
 #### Step 2: Configure Environment Variable
-1. Go to your Replit project
-2. Open Secrets (lock icon)
-3. Add new secret:
+1. Go to Railway (railway.app) → project **valiant-generosity** → the **TruAgent** service
+2. Open the **Variables** tab
+3. Add a variable:
    - Key: `EMAIL_WEBHOOK_URL`
    - Value: [Paste webhook URL from Step 1]
 
@@ -284,9 +284,9 @@ https://truagent-production.up.railway.app/send-sms
 4. Copy the webhook URL
 
 #### Step 2: Configure Environment Variable
-1. Go to your Replit project
-2. Open Secrets
-3. Add new secret:
+1. Go to Railway (railway.app) → project **valiant-generosity** → the **TruAgent** service
+2. Open the **Variables** tab
+3. Add a variable:
    - Key: `SMS_WEBHOOK_URL`
    - Value: [Paste webhook URL from Step 1]
 
@@ -316,7 +316,7 @@ https://truagent-production.up.railway.app/send-sms
 
 ## 5. Environment Variables
 
-Configure these in Replit Secrets (lock icon in sidebar):
+Configure these in **Railway → TruAgent service → Variables**:
 
 | Variable | Purpose | Example Value |
 |----------|---------|---------------|
@@ -330,7 +330,7 @@ Configure these in Replit Secrets (lock icon in sidebar):
 - Use strong, random secrets (at least 32 characters)
 - Never share secrets in code or commits
 - Rotate secrets periodically
-- Store them only in Replit Secrets
+- Store them only in Railway Variables (never in code or commits)
 
 ---
 
@@ -341,7 +341,7 @@ Configure these in Replit Secrets (lock icon in sidebar):
 **Problem**: AI updates not syncing to Roofr
 
 **Solutions**:
-1. Check `ROOFR_WEBHOOK_URL` is set in Replit Secrets
+1. Check `ROOFR_WEBHOOK_URL` is set in Railway Variables
 2. Verify Zapier task history for errors
 3. Ensure Roofr Zap is turned ON
 4. Check AI Agent response - it will say "synced", "not configured", or "sync failed: [error]"
@@ -351,7 +351,7 @@ Configure these in Replit Secrets (lock icon in sidebar):
 **Problem**: Invoices/expenses not appearing
 
 **Solutions**:
-1. Verify `QUICKBOOKS_SECRET` matches in both Zapier and Replit
+1. Verify `QUICKBOOKS_SECRET` matches in both Zapier and Railway
 2. Ensure `job_id` field is mapped correctly (this links transactions to jobs)
 3. Check Zapier task history for 403 errors (wrong secret) or 400 errors (invalid data)
 4. Confirm QuickBooks Zaps are ON
@@ -438,9 +438,11 @@ The AI can automatically:
 ## Need Help?
 
 **Login Credentials:**
-- Super Admin: fred@trulineroofing.com / truline2024
-- Manager: office@trulineroofing.com / office123
-- Field Crew: fieldcrew@trulineroofing.com / roof123
+The demo passwords were rotated on 2026-06-14. The current strong passwords live in
+the private, git-ignored file `ROTATED-LOGINS-2026-06-14.txt` (ask Fred). Accounts:
+- Super Admin: fred@trulineroofing.com
+- Manager: office@trulineroofing.com
+- Field Crew: fieldcrew@trulineroofing.com
 
 **Support Resources:**
 1. Check this guide first
