@@ -102,6 +102,19 @@ db_file = os.path.join(DATA_DIR, "db.json")
 DOCUMENTS_DIR = os.path.join(DATA_DIR, "documents")
 PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 
+# Storage backend. When SUPABASE_URL + SUPABASE_SERVICE_KEY are set, the whole-db
+# document is stored as a single JSONB row in Supabase Postgres (table app_state,
+# id=1) via the REST API, instead of db.json — making the data a real database
+# (live dashboard, backups, concurrency) while keeping the exact dict-in/dict-out
+# contract the rest of the app relies on. When they are blank, behaviour is
+# unchanged (local file db.json) — which is also the instant rollback path: unset
+# the vars and the app reads the file again. On first boot in Postgres mode the
+# existing db.json (the live data) is imported automatically and left in place as a
+# backup. Uploaded documents/photos always stay on DATA_DIR.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+PG_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
 # ─── Specs-corpus constants ───────────────────────────────────────────────────
 # Volume-solids per coating chemistry — scraped from manufacturer specs.
 # Dry-mil ≈ gallons_applied × 1604 × volume_solids ÷ sqft_coated.
@@ -210,7 +223,128 @@ def _seed_db() -> dict:
     }
 
 
+def _normalize_db(db) -> bool:
+    """Idempotent in-memory upgrades applied on every load. Returns True if the
+    db dict was modified (so the caller can persist it). Shared by the file and
+    Postgres storage paths so the two backends never drift."""
+    needs_migration = False
+
+    for email, user_data in db.get("users", {}).items():
+        if "is_admin" in user_data and "role" not in user_data:
+            if user_data["is_admin"]:
+                user_data["role"] = "super_admin"
+            else:
+                if email == "office@trulineroofing.com":
+                    user_data["role"] = "manager"
+                else:
+                    user_data["role"] = "user"
+            del user_data["is_admin"]
+            needs_migration = True
+
+    # Auto-rotate any seeded user still on a retired public demo password
+    # (sec-02) to its strong replacement, so the live db is upgraded without a
+    # lockout. Idempotent: only fires while the old hash is present.
+    for _email, _retired_hash in _RETIRED_DEMO_HASHES.items():
+        _u = db.get("users", {}).get(_email)
+        if _u and _u.get("password_hash") == _retired_hash:
+            _u["password_hash"] = _ROTATED_USER_HASHES[_email]
+            needs_migration = True
+
+    for _key in ("weather_profiles", "templates", "sds", "employees",
+                 "parties", "opportunities", "equipment", "doc_chunks"):
+        if _key not in db:
+            db[_key] = {}
+            needs_migration = True
+    if "cron_log" not in db:
+        db["cron_log"] = []
+        needs_migration = True
+    if "pending_voice_reports" not in db:
+        db["pending_voice_reports"] = []
+        needs_migration = True
+    if not db.get("weather_profiles"):
+        db["weather_profiles"] = {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()}
+        needs_migration = True
+    if "financials" not in db:
+        db["financials"] = {}
+        needs_migration = True
+    if "invoices" not in db.get("financials", {}):
+        db.setdefault("financials", {})["invoices"] = {}
+        needs_migration = True
+    if "expenses" not in db.get("financials", {}):
+        db.setdefault("financials", {})["expenses"] = {}
+        needs_migration = True
+
+    return needs_migration
+
+
+# ─── Postgres storage backend via Supabase REST (active when PG_ENABLED) ──────
+# Uses the service_role key, which bypasses RLS. The whole db lives in one JSONB
+# row (app_state.id = 1). The table is created out-of-band by a Supabase migration
+# (create_app_state_singleton), so there is no runtime DDL here. requests is
+# imported lazily to match the rest of this module.
+def _pg_headers(extra=None):
+    h = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
+def _pg_url():
+    return f"{SUPABASE_URL}/rest/v1/app_state"
+
+
+def _pg_load_row():
+    """Return the stored db dict, or None if the singleton row does not exist."""
+    import requests
+    r = requests.get(
+        _pg_url(),
+        params={"id": "eq.1", "select": "data", "limit": "1"},
+        headers=_pg_headers(), timeout=15,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0]["data"] if rows else None
+
+
+def _pg_save(data):
+    """Upsert the singleton row (POST + merge-duplicates acts as upsert on the PK)."""
+    import requests
+    r = requests.post(
+        _pg_url(),
+        headers=_pg_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
+        data=json.dumps({"id": 1, "data": data}), timeout=15,
+    )
+    r.raise_for_status()
+
+
 def load_db():
+    if PG_ENABLED:
+        db = _pg_load_row()
+        if db is None:
+            # First boot on Postgres: import the existing db.json (the live data)
+            # if present on the volume, otherwise seed. The file is left in place
+            # untouched as a backup and as the rollback source (unset the SUPABASE_*
+            # vars to revert to file mode).
+            if os.path.exists(db_file):
+                try:
+                    with open(db_file, 'r') as f:
+                        db = json.load(f)
+                except (json.JSONDecodeError, OSError, ValueError):
+                    db = _seed_db()
+            else:
+                db = _seed_db()
+            _normalize_db(db)
+            _pg_save(db)
+            return _pg_load_row() or db
+        if _normalize_db(db):
+            _pg_save(db)
+        return db
+
+    # ── File mode (DATABASE_URL unset) — original behaviour, unchanged ──
     if os.path.exists(db_file):
         try:
             with open(db_file, 'r') as f:
@@ -226,61 +360,16 @@ def load_db():
             save_db(db)
             return db
 
-        needs_migration = False
-
-        for email, user_data in db.get("users", {}).items():
-            if "is_admin" in user_data and "role" not in user_data:
-                if user_data["is_admin"]:
-                    user_data["role"] = "super_admin"
-                else:
-                    if email == "office@trulineroofing.com":
-                        user_data["role"] = "manager"
-                    else:
-                        user_data["role"] = "user"
-                del user_data["is_admin"]
-                needs_migration = True
-        
-        # Auto-rotate any seeded user still on a retired public demo password
-        # (sec-02) to its strong replacement, so the live db.json is upgraded
-        # without a lockout. Idempotent: only fires while the old hash is present.
-        for _email, _retired_hash in _RETIRED_DEMO_HASHES.items():
-            _u = db.get("users", {}).get(_email)
-            if _u and _u.get("password_hash") == _retired_hash:
-                _u["password_hash"] = _ROTATED_USER_HASHES[_email]
-                needs_migration = True
-
-        for _key in ("weather_profiles", "templates", "sds", "employees",
-                     "parties", "opportunities", "equipment", "doc_chunks"):
-            if _key not in db:
-                db[_key] = {}
-                needs_migration = True
-        if "cron_log" not in db:
-            db["cron_log"] = []
-            needs_migration = True
-        if "pending_voice_reports" not in db:
-            db["pending_voice_reports"] = []
-            needs_migration = True
-        if not db.get("weather_profiles"):
-            db["weather_profiles"] = {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()}
-            needs_migration = True
-        if "financials" not in db:
-            db["financials"] = {}
-            needs_migration = True
-        if "invoices" not in db.get("financials", {}):
-            db.setdefault("financials", {})["invoices"] = {}
-            needs_migration = True
-        if "expenses" not in db.get("financials", {}):
-            db.setdefault("financials", {})["expenses"] = {}
-            needs_migration = True
-
-        if needs_migration:
+        if _normalize_db(db):
             save_db(db)
-
         return db
 
     return _seed_db()
 
 def save_db(data):
+    if PG_ENABLED:
+        _pg_save(data)
+        return
     # Atomic write: dump to a temp file in the same directory, then os.replace()
     # it over the target. A crash mid-write can't leave db.json half-written and
     # invalid (which would fail to load on the next boot).
