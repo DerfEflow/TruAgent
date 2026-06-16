@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TruAgent — Cross-App Dashboard</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+  <style>
+    /* Standalone dashboard layout — reuses the shared style.css color tokens
+       so it matches the SPA without depending on its tab/card classes. */
+    .dash-wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+    .dash-header {
+      display: flex; align-items: center; gap: 0.85rem;
+      padding: 1rem 0 1.25rem; border-bottom: 1px solid var(--border);
+      margin-bottom: 1.5rem; flex-wrap: wrap;
+    }
+    .dash-header img { height: 38px; }
+    .dash-header h1 { font-size: 1.15rem; letter-spacing: 0.04em; font-weight: 600; }
+    .dash-header h1 strong { color: var(--green-hi); }
+    .dash-sub { color: var(--t2); font-size: 0.8rem; margin-top: 0.15rem; }
+    .dash-spacer { flex: 1; }
+    .role-pill {
+      background: var(--green-dim); color: var(--green-hi);
+      border: 1px solid var(--border-hi); border-radius: 999px;
+      padding: 0.2rem 0.7rem; font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .dash-btn {
+      background: var(--surface); color: var(--t1); border: 1px solid var(--border-hi);
+      border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; font-size: 0.8rem;
+    }
+    .dash-btn:hover { background: var(--panel-hi); }
+    .dash-btn.primary { background: var(--green); border-color: var(--green-hi); color: var(--white); }
+
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.1rem; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 1.1rem 1.2rem; box-shadow: 0 1px 0 rgba(0,0,0,0.25);
+    }
+    .card h2 {
+      font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--t2); margin-bottom: 0.85rem; display: flex; align-items: center; gap: 0.5rem;
+    }
+    .card h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green-hi); }
+
+    .stat-row { display: flex; gap: 1.4rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+    .stat { }
+    .stat .num { font-size: 1.7rem; font-weight: 700; color: var(--t1); line-height: 1; }
+    .stat .lbl { font-size: 0.7rem; color: var(--t2); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.25rem; }
+    .stat .num.good { color: var(--green-hi); }
+    .stat .num.warn { color: var(--amber); }
+    .stat .num.bad  { color: var(--red); }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+    .chip {
+      background: var(--surface); border: 1px solid var(--border-hi); border-radius: 6px;
+      padding: 0.25rem 0.55rem; font-size: 0.74rem; color: var(--t1);
+    }
+    .chip b { color: var(--green-hi); margin-left: 0.3rem; }
+
+    table.dash-tbl { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    table.dash-tbl th {
+      text-align: left; color: var(--t2); font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.04em; font-size: 0.66rem; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border);
+    }
+    table.dash-tbl td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); color: var(--t1); }
+    table.dash-tbl tr:last-child td { border-bottom: none; }
+    table.dash-tbl td.alert { color: var(--amber); font-weight: 600; }
+    table.dash-tbl td.thin { color: var(--red); font-weight: 600; }
+    .muted { color: var(--t2); }
+    .empty { color: var(--t2); font-size: 0.82rem; padding: 0.6rem 0; }
+
+    .gen-at { color: var(--t3); font-size: 0.7rem; margin-top: 1.5rem; text-align: center; }
+
+    /* login / error gate */
+    .gate { max-width: 420px; margin: 5rem auto; text-align: center; }
+    .gate img { height: 56px; margin-bottom: 1rem; }
+    .gate h1 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+    .gate p { color: var(--t2); margin-bottom: 1.4rem; }
+    .gate a.dash-btn { text-decoration: none; display: inline-block; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <!-- Logged-out / 401 gate -->
+  <div id="gate" class="gate hidden">
+    <img src="/static/logo.png" alt="Truline Roofing">
+    <h1>Please log in</h1>
+    <p id="gate-msg">Sign in to the TruAgent portal, then return here to view the cross-app dashboard.</p>
+    <a class="dash-btn primary" href="/">Go to login</a>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dash" class="dash-wrap hidden">
+    <div class="dash-header">
+      <img src="/static/logo.png" alt="Truline Roofing">
+      <div>
+        <h1><strong>TRULINE</strong> ROOFING</h1>
+        <div class="dash-sub">Cross-App Dashboard</div>
+      </div>
+      <div class="dash-spacer"></div>
+      <span id="role-pill" class="role-pill"></span>
+      <button class="dash-btn" onclick="loadDashboard()">Refresh</button>
+      <a class="dash-btn" href="/">Back to app</a>
+    </div>
+
+    <div class="card-grid">
+      <!-- JOBS -->
+      <div class="card" id="card-jobs">
+        <h2><span class="dot"></span> Jobs</h2>
+        <div class="stat-row">
+          <div class="stat"><div class="num" id="jobs-total">0</div><div class="lbl">Total jobs</div></div>
+        </div>
+        <div class="chips" id="jobs-by-stage"></div>
+        <div style="margin-top:0.9rem;">
+          <table class="dash-tbl">
+            <thead><tr><th>Client</th><th>Stage</th><th>%</th><th>Alerts</th></tr></thead>
+            <tbody id="jobs-recent"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- FIELD ACTIVITY -->
+      <div class="card" id="card-field">
+        <h2><span class="dot"></span> Field Activity</h2>
+        <div class="stat-row">
+          <div class="stat"><div class="num" id="thin-total">0</div><div class="lbl">Thin flags (total)</div></div>
+        </div>
+        <table class="dash-tbl">
+          <thead><tr><th>Job</th><th>Date</th><th>Crew</th><th>Sqft</th><th>Thin</th></tr></thead>
+          <tbody id="field-recent"></tbody>
+        </table>
+      </div>
+
+      <!-- LEADS (manager+) -->
+      <div class="card hidden" id="card-leads">
+        <h2><span class="dot"></span> Leads</h2>
+        <div class="stat-row">
+          <div class="stat"><div class="num good" id="leads-open">0</div><div class="lbl">Open opportunities</div></div>
+        </div>
+        <table class="dash-tbl">
+          <thead><tr><th>Client</th><th>Source</th><th>Last seen</th></tr></thead>
+          <tbody id="leads-recent"></tbody>
+        </table>
+      </div>
+
+      <!-- FINANCIALS (manager+) -->
+      <div class="card hidden" id="card-financials">
+        <h2><span class="dot"></span> Financials</h2>
+        <div class="stat-row">
+          <div class="stat"><div class="num good" id="fin-revenue">$0</div><div class="lbl">Revenue</div></div>
+          <div class="stat"><div class="num" id="fin-costs">$0</div><div class="lbl">Costs</div></div>
+          <div class="stat"><div class="num" id="fin-profit">$0</div><div class="lbl">Profit</div></div>
+          <div class="stat"><div class="num" id="fin-margin">0%</div><div class="lbl">Margin</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="gen-at" id="gen-at"></div>
+  </div>
+
+  <div id="loading" style="text-align:center;color:var(--t2);padding:5rem 0;">Loading dashboard&hellip;</div>
+
+  <script>
+    // Reuse the exact localStorage token key the SPA uses (static/app.js: 'token').
+    const TOKEN_KEY = 'token';
+
+    function showGate(msg) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('dash').classList.add('hidden');
+      const gate = document.getElementById('gate');
+      if (msg) document.getElementById('gate-msg').textContent = msg;
+      gate.classList.remove('hidden');
+    }
+
+    function esc(s) {
+      if (s === null || s === undefined) return '';
+      return String(s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    function money(n) {
+      if (n === null || n === undefined) return '—';
+      return '$' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+
+    function fmtDate(s) {
+      if (!s) return '—';
+      const d = new Date(s);
+      if (isNaN(d)) return esc(s);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    async function loadDashboard() {
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (!token) { showGate(); return; }
+
+      document.getElementById('gate').classList.add('hidden');
+      document.getElementById('loading').classList.remove('hidden');
+
+      let res;
+      try {
+        res = await fetch('/dashboard/summary', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+      } catch (e) {
+        showGate('Could not reach the server. Check your connection and try again.');
+        return;
+      }
+
+      if (res.status === 401) {
+        showGate('Your session has expired. Please sign in again.');
+        return;
+      }
+      if (!res.ok) {
+        showGate('Dashboard failed to load (HTTP ' + res.status + ').');
+        return;
+      }
+
+      const data = await res.json();
+      render(data);
+    }
+
+    function render(d) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('dash').classList.remove('hidden');
+
+      document.getElementById('role-pill').textContent = (d.role || 'user').replace('_', ' ');
+
+      // ── Jobs ──
+      const jobs = d.jobs || {};
+      document.getElementById('jobs-total').textContent = jobs.total || 0;
+
+      const byStage = jobs.by_stage || {};
+      const stageEl = document.getElementById('jobs-by-stage');
+      const stageKeys = Object.keys(byStage);
+      stageEl.innerHTML = stageKeys.length
+        ? stageKeys.map(k => `<span class="chip">${esc(k)}<b>${byStage[k]}</b></span>`).join('')
+        : '<span class="muted">No stages recorded</span>';
+
+      const jr = document.getElementById('jobs-recent');
+      const recent = jobs.recent || [];
+      jr.innerHTML = recent.length
+        ? recent.map(j => `<tr>
+            <td>${esc(j.client_name) || '<span class="muted">—</span>'}</td>
+            <td>${esc(j.workflow_stage) || '<span class="muted">—</span>'}</td>
+            <td>${j.pct_complete != null ? esc(j.pct_complete) + '%' : '—'}</td>
+            <td class="${j.alert_count ? 'alert' : ''}">${j.alert_count || 0}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="4" class="empty">No jobs yet.</td></tr>';
+
+      // ── Field activity ──
+      const field = d.field || {};
+      document.getElementById('thin-total').textContent = field.thin_flag_total || 0;
+      const fr = document.getElementById('field-recent');
+      const logs = field.recent_logs || [];
+      fr.innerHTML = logs.length
+        ? logs.map(l => `<tr>
+            <td>${esc(l.job_id)}</td>
+            <td>${fmtDate(l.date)}</td>
+            <td>${esc(l.crew) || '<span class="muted">—</span>'}</td>
+            <td>${l.sqft_coated != null ? esc(l.sqft_coated) : '—'}</td>
+            <td class="${l.thin_flags ? 'thin' : ''}">${l.thin_flags || 0}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="5" class="empty">No production logs yet.</td></tr>';
+
+      // ── Leads (manager+ only; key absent for field crew) ──
+      const leadsCard = document.getElementById('card-leads');
+      if (d.leads) {
+        leadsCard.classList.remove('hidden');
+        document.getElementById('leads-open').textContent = d.leads.open || 0;
+        const lr = document.getElementById('leads-recent');
+        const ls = d.leads.recent || [];
+        lr.innerHTML = ls.length
+          ? ls.map(o => `<tr>
+              <td>${esc(o.client_name) || '<span class="muted">—</span>'}</td>
+              <td>${esc(o.source) || '<span class="muted">—</span>'}</td>
+              <td>${fmtDate(o.last_seen)}</td>
+            </tr>`).join('')
+          : '<tr><td colspan="3" class="empty">No open leads.</td></tr>';
+      } else {
+        leadsCard.classList.add('hidden');
+      }
+
+      // ── Financials (manager+ only; null for field crew) ──
+      const finCard = document.getElementById('card-financials');
+      if (d.financials) {
+        finCard.classList.remove('hidden');
+        const f = d.financials;
+        document.getElementById('fin-revenue').textContent = money(f.total_revenue);
+        document.getElementById('fin-costs').textContent = money(f.total_costs);
+        const profitEl = document.getElementById('fin-profit');
+        profitEl.textContent = money(f.profit);
+        profitEl.className = 'num ' + ((f.profit || 0) >= 0 ? 'good' : 'bad');
+        const m = f.margin_percent;
+        document.getElementById('fin-margin').textContent = (m != null ? esc(m) : '0') + '%';
+      } else {
+        finCard.classList.add('hidden');
+      }
+
+      document.getElementById('gen-at').textContent =
+        d.generated_at ? 'Generated ' + new Date(d.generated_at).toLocaleString() : '';
+    }
+
+    loadDashboard();
+  </script>
+</body>
+</html>

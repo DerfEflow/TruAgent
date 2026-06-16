@@ -1017,6 +1017,119 @@ def _job_margin_live(db: dict, job: dict) -> Optional[float]:
     return None
 
 
+def _log_thin_flags(log: dict) -> int:
+    """Count thin-flagged readings on a single production log. Per the Delta
+    field-data wire contract, a log may carry dft_readings / wft_readings, each
+    a list of {reading, is_thin, ...}. A 'thin flag' is any reading whose
+    is_thin is truthy. Both lists are optional; missing/None means zero."""
+    n = 0
+    for key in ("dft_readings", "wft_readings"):
+        for r in (log.get(key) or []):
+            if isinstance(r, dict) and r.get("is_thin"):
+                n += 1
+    return n
+
+
+def _dashboard_summary(db: dict, role: str) -> dict:
+    """Build the cross-app dashboard summary (step 9), role-gated.
+
+    Role rules (enforced here, never just in the UI):
+      - 'user' (field crew): NO leads key, financials = null.
+      - manager / super_admin: leads (scope != 'public' only) + financials.
+
+    O(n) over jobs: a single pass collects job counts/by-stage, recent jobs,
+    recent field logs, and the company-wide thin-flag total."""
+    jobs = db.get("jobs", {})
+    is_manager = role in ("manager", "super_admin")
+
+    by_stage: Dict[str, int] = {}
+    recent_jobs = []
+    recent_logs = []
+    thin_flag_total = 0
+
+    for jid, job in jobs.items():
+        stage = job.get("workflow_stage") or "Unstaged"
+        by_stage[stage] = by_stage.get(stage, 0) + 1
+        recent_jobs.append({
+            "job_id": job.get("job_id") or jid,
+            "client_name": job.get("client_name"),
+            "address": job.get("address"),
+            "status": job.get("status"),
+            "workflow_stage": job.get("workflow_stage"),
+            "pct_complete": job.get("pct_complete"),
+            "alert_count": len(job.get("alerts") or []),
+        })
+        for log in (job.get("production_logs") or []):
+            flags = _log_thin_flags(log)
+            thin_flag_total += flags
+            recent_logs.append({
+                "job_id": job.get("job_id") or jid,
+                "date": log.get("date"),
+                "crew": log.get("crew"),
+                "sqft_coated": log.get("sqft_coated"),
+                "thin_flags": flags,
+                # private sort key (stripped before return)
+                "_logged_at": log.get("logged_at") or log.get("date") or "",
+            })
+
+    # Recent jobs: most-recently-touched first where a hint exists, else stable.
+    recent_jobs = recent_jobs[-10:][::-1]
+    # Recent logs: newest first by logged_at/date, cap at 10.
+    recent_logs.sort(key=lambda r: r.get("_logged_at") or "", reverse=True)
+    recent_logs = recent_logs[:10]
+    for r in recent_logs:
+        r.pop("_logged_at", None)
+
+    summary = {
+        "role": role,
+        "generated_at": datetime.now().isoformat(),
+        "jobs": {
+            "total": len(jobs),
+            "by_stage": by_stage,
+            "recent": recent_jobs,
+        },
+        "field": {
+            "recent_logs": recent_logs,
+            "thin_flag_total": thin_flag_total,
+        },
+        # financials/leads filled in below per role
+        "financials": None,
+    }
+
+    if is_manager:
+        fin = _company_financials_summary(db)
+        summary["financials"] = {
+            "total_revenue": fin.get("total_revenue"),
+            "total_costs": fin.get("total_costs"),
+            "profit": fin.get("profit"),
+            "margin_percent": fin.get("margin_percent"),
+        }
+        opps = db.get("opportunities", {})
+        # Truline-only view: exclude public-Dominate clients (scope == 'public').
+        visible = [o for o in opps.values() if o.get("scope") != "public"]
+        # 'open' = not yet won/closed. Opportunities track a 'stage'; treat the
+        # terminal stages as closed, everything else as open.
+        closed_stages = {"Won", "Closed", "Lost", "closed", "won", "lost"}
+        open_count = sum(1 for o in visible if o.get("stage") not in closed_stages)
+        recent_leads = sorted(
+            visible,
+            key=lambda o: o.get("last_seen") or o.get("first_touch_at") or "",
+            reverse=True,
+        )[:10]
+        summary["leads"] = {
+            "open": open_count,
+            "recent": [{
+                "id": o.get("id"),
+                "client_name": o.get("client_name"),
+                "source": o.get("source"),
+                "last_seen": o.get("last_seen") or o.get("first_touch_at"),
+            } for o in recent_leads],
+        }
+    # For role 'user', the 'leads' key is intentionally absent and financials is
+    # null — money and pipeline never leak to field crew.
+    return summary
+
+
 def _cost_breakdown(db: dict, job: dict) -> dict:
     """Per-job cost bucketed into categories. A7+A8."""
     budget = job.get("budget") or {}
@@ -1686,6 +1799,18 @@ def _run_agent_loop(client, messages: list, tools: list, current_user: dict,
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
+
+
+@app.get("/dashboard/summary")
+async def dashboard_summary(current_user: dict = Depends(get_current_user)):
+    """Cross-app dashboard (step 9): one role-gated rollup of jobs, field
+    activity, leads, and financials for the standalone /static/dashboard.html
+    card view. Role 'user' (field crew) gets no leads key and financials=null;
+    manager+ get leads (Truline-only: scope != 'public') and financials."""
+    db = load_db()
+    role = current_user.get("role") or "user"
+    return _dashboard_summary(db, role)
+
 
 @app.post("/login")
 async def login(data: Login):
