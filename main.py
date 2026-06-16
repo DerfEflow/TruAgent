@@ -439,6 +439,19 @@ class ProductionLogWebhook(BaseModel):
     photo_refs: Optional[List[str]] = None
     notes: Optional[str] = None
     coat_seq: Optional[int] = None
+    # ── Delta field-data wire contract (step 6 receiver) — all optional. ────────
+    # Log-level field readings/warnings/punch/photo metadata, stored verbatim on
+    # the appended log_entry. The lists carry whatever shape Delta sends; we never
+    # interpret or recompute them.
+    dft_readings: Optional[List[dict]] = None   # [{reading, is_thin, sample_number}]
+    wft_readings: Optional[List[dict]] = None   # [{reading, is_thin}]
+    ai_warnings: Optional[List[dict]] = None    # [{warning_type, severity, message, dismissed}]
+    punch_list: Optional[List[dict]] = None     # [{repair_needed, is_completed}]
+    photo_meta: Optional[List[dict]] = None     # [{phase, photo_type, description, latitude, longitude}]
+    # Job-level objects (latest non-empty wins). spec_baseline values are warranty
+    # thresholds — passed through verbatim, never computed or guessed here.
+    inspection: Optional[dict] = None           # {inspection_date, inspector_name, manufacturer_name, warranty_required}
+    spec_baseline: Optional[dict] = None         # {required_wft_mils, required_dft_mils, coverage_rate, expected_coating_gallons, min_temp_f, max_temp_f, max_humidity_pct, min_dewpoint_spread_f}
 
 class LeadWebhook(BaseModel):
     secret: str
@@ -832,20 +845,56 @@ def _op_send_email(db: dict, to: Optional[str], subject: str, body: str,
     return _email_dispatch(db, payload)
 
 
-def _op_send_sms(to: Optional[str], message: str, user_email: str) -> dict:
+def _queue_sms(db: dict, payload: dict, reason: str) -> dict:
+    """Park an SMS in the sms_outbox so it is never lost. Flushed by the
+    flush_sms cron task (or POST /sms-outbox/flush) once SMS_WEBHOOK_URL is
+    configured. Persists immediately. Mirrors _queue_email."""
+    outbox = db.setdefault("sms_outbox", [])
+    entry = {
+        "id": f"sms_{int(datetime.now().timestamp() * 1000)}_{len(outbox)}",
+        "payload": payload,
+        "status": "queued",
+        "queued_reason": reason,
+        "attempts": 0,
+        "queued_at": datetime.now().isoformat(),
+        "last_error": None,
+    }
+    outbox.append(entry)
+    save_db(db)
+    return entry
+
+
+def _sms_dispatch(db: dict, payload: dict) -> dict:
+    """Single choke point for outbound SMS. Sends through the Zapier
+    SMS_WEBHOOK_URL when configured; otherwise (or on failure) queues the text
+    in the sms_outbox instead of dropping it. Mirrors _email_dispatch."""
+    to = payload.get("to")
     if not SMS_WEBHOOK_URL:
-        return {"status": "error", "message": "SMS service not configured"}
-    if not to:
-        return {"status": "error", "message": "A recipient ('to') is required"}
-    payload = {"to": to, "message": message, "sent_by": user_email,
-               "sent_at": datetime.now().isoformat()}
+        entry = _queue_sms(db, payload, "sms webhook not configured")
+        return {"status": "queued",
+                "message": (f"SMS to {to} saved to the outbox ({entry['id']}). "
+                            "It will send automatically once the SMS Zap "
+                            "(SMS_WEBHOOK_URL) is configured.")}
     try:
         import requests
         resp = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
         resp.raise_for_status()
         return {"status": "ok", "message": f"SMS sent to {to}"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to send SMS: {e}"}
+        entry = _queue_sms(db, payload, f"send failed: {e}")
+        entry["attempts"] = 1
+        entry["last_error"] = str(e)
+        save_db(db)
+        return {"status": "queued",
+                "message": f"Send to {to} failed ({e}); SMS queued for retry ({entry['id']})."}
+
+
+def _op_send_sms(db: dict, to: Optional[str], message: str, user_email: str) -> dict:
+    if not to:
+        return {"status": "error", "message": "A recipient ('to') is required"}
+    payload = {"to": to, "message": message, "sent_by": user_email,
+               "sent_at": datetime.now().isoformat()}
+    return _sms_dispatch(db, payload)
 
 
 def _job_financials(db: dict, job_id: Optional[str]) -> dict:
@@ -1374,7 +1423,7 @@ def execute_agent_tool(name: str, args: dict, current_user: dict, db: dict) -> d
                               args.get("body", ""), args.get("html"),
                               args.get("document_ids"), email)
     if name == "send_sms":
-        return _op_send_sms(args.get("to"), args.get("message", ""), email)
+        return _op_send_sms(db, args.get("to"), args.get("message", ""), email)
     if name == "get_job_financials":
         return _job_financials(db, args.get("job_id"))
     if name == "company_financials_summary":
@@ -1720,14 +1769,25 @@ async def zapier_webhook(request: Request):
     if payload.get("secret") != ZAPIER_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
-    # Accept whatever fields Roofr/Zapier sends so new fields (job value, customer
-    # phone/email, assignee, etc.) can be mapped in Zapier without a code change.
     # Drop the secret, ignore blanks, and flatten a nested "data" object if present.
     fields = {k: v for k, v in payload.items()
               if k not in ("secret", "data") and v not in (None, "")}
     nested = payload.get("data")
     if isinstance(nested, dict):
         fields.update({k: v for k, v in nested.items() if v not in (None, "")})
+
+    # Whitelist (step 7b): this is the broadest-write, weakest door, so it may
+    # only set a fixed set of safe operational fields. Anything financial
+    # (budget / contract_value / financials / invoices / expenses / margin / cost)
+    # must NEVER come in through here — those belong to the QuickBooks / Alpha
+    # doors. Apply the whitelist AFTER the nested-data flatten so a hostile or
+    # mis-mapped Zap cannot smuggle a money field in via `data`.
+    _ZAPIER_ALLOWED = {
+        "job_id", "client_name", "address", "status", "workflow_stage",
+        "phone", "email", "customer_phone", "customer_email", "assignee",
+        "job_value", "lead_source", "notes", "roofr_job_id",
+    }
+    fields = {k: v for k, v in fields.items() if k in _ZAPIER_ALLOWED}
 
     job_id = fields.get("job_id")
     if not job_id:
@@ -1920,30 +1980,14 @@ async def send_email(email: EmailMessage, current_user: dict = Depends(get_curre
 
 @app.post("/send-sms")
 async def send_sms(sms: SMSMessage, current_user: dict = Depends(get_current_user)):
-    """Send SMS via Zapier webhook integration (supports Twilio, etc.)"""
-    
-    if not SMS_WEBHOOK_URL:
-        raise HTTPException(status_code=503, detail="SMS service not configured")
-    
-    payload = {
-        "to": sms.to,
-        "message": sms.message,
-        "sent_by": current_user["email"],
-        "sent_at": datetime.now().isoformat()
-    }
-    
-    try:
-        import requests
-        response = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        
-        return {
-            "status": "ok",
-            "message": f"SMS sent to {sms.to}",
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
+    """Send SMS via Zapier webhook integration (supports Twilio, etc.).
+    When the webhook is not configured (or the send fails), the text is queued
+    in the sms_outbox instead of being dropped."""
+    db = load_db()
+    result = _op_send_sms(db, sms.to, sms.message, current_user["email"])
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return {**result, "timestamp": datetime.now().isoformat()}
 
 @app.get("/outbox")
 async def get_outbox(current_user: dict = Depends(get_manager_or_above)):
@@ -1991,6 +2035,55 @@ def _flush_outbox_once() -> str:
             failed += 1
     save_db(db)
     return f"outbox flush: {sent} sent, {failed} failed"
+
+
+@app.get("/sms-outbox")
+async def get_sms_outbox(current_user: dict = Depends(get_manager_or_above)):
+    """Queued/sent outbound texts (parked when the SMS Zap is missing or a send
+    fails). Mirrors GET /outbox."""
+    db = load_db()
+    entries = []
+    for e in db.get("sms_outbox", []):
+        p = e.get("payload", {})
+        entries.append({
+            "id": e.get("id"), "status": e.get("status"),
+            "to": p.get("to"), "message": p.get("message"),
+            "queued_at": e.get("queued_at"), "queued_reason": e.get("queued_reason"),
+            "attempts": e.get("attempts", 0), "last_error": e.get("last_error"),
+            "sent_at": e.get("sent_at"),
+        })
+    return {"status": "ok", "sms_outbox": entries,
+            "sms_webhook_configured": bool(SMS_WEBHOOK_URL)}
+
+
+@app.post("/sms-outbox/flush")
+async def flush_sms_outbox(current_user: dict = Depends(get_manager_or_above)):
+    """Attempt delivery of every queued SMS now."""
+    return {"status": "ok", "result": _flush_sms_once()}
+
+
+def _flush_sms_once() -> str:
+    if not SMS_WEBHOOK_URL:
+        return "sms webhook not configured — sms outbox left untouched"
+    db = load_db()
+    sent = failed = 0
+    import requests
+    for entry in db.get("sms_outbox", []):
+        if entry.get("status") != "queued":
+            continue
+        try:
+            requests.post(SMS_WEBHOOK_URL, json=entry["payload"], timeout=10).raise_for_status()
+            entry["status"] = "sent"
+            entry["sent_at"] = datetime.now().isoformat()
+            sent += 1
+        except Exception as e:
+            entry["attempts"] = entry.get("attempts", 0) + 1
+            entry["last_error"] = str(e)
+            if entry["attempts"] >= 20:
+                entry["status"] = "dead"
+            failed += 1
+    save_db(db)
+    return f"sms outbox flush: {sent} sent, {failed} failed"
 
 
 @app.post("/documents/upload")
@@ -2168,27 +2261,12 @@ async def execute_ai_action(action: AIAction, current_user: dict = Depends(get_c
                               current_user["email"])
     
     elif action.action == "send_sms":
-        to = action.parameters.get("to")
-        message = action.parameters.get("message")
-        
-        if not SMS_WEBHOOK_URL:
-            return {"status": "error", "message": "SMS service not configured"}
-        
-        payload = {
-            "to": to,
-            "message": message,
-            "sent_by": current_user["email"],
-            "sent_at": datetime.now().isoformat()
-        }
-        
-        try:
-            import requests
-            response = requests.post(SMS_WEBHOOK_URL, json=payload, timeout=10)
-            response.raise_for_status()
-            return {"status": "ok", "message": f"SMS sent to {to}"}
-        except Exception as e:
-            return {"status": "error", "message": f"Failed to send SMS: {str(e)}"}
-    
+        # Route through the SMS choke point so a failed/unconfigured text is
+        # parked in the sms_outbox instead of being silently lost.
+        return _op_send_sms(db, action.parameters.get("to"),
+                            action.parameters.get("message", ""),
+                            current_user["email"])
+
     return {"status": "error", "message": "Unknown action"}
 
 @app.post("/chat")
@@ -2428,7 +2506,26 @@ async def production_webhook(payload: ProductionLogWebhook):
         "coat_seq": payload.coat_seq,
         "logged_at": datetime.now().isoformat(),
     }
+    # Delta field-data wire contract (step 6 receiver): attach the optional
+    # log-level readings/warnings/punch/photo metadata verbatim. Only include a
+    # field when the sender actually sent it, so old logs stay clean.
+    if payload.dft_readings is not None:
+        log_entry["dft_readings"] = payload.dft_readings
+    if payload.wft_readings is not None:
+        log_entry["wft_readings"] = payload.wft_readings
+    if payload.ai_warnings is not None:
+        log_entry["ai_warnings"] = payload.ai_warnings
+    if payload.punch_list is not None:
+        log_entry["punch_list"] = payload.punch_list
+    if payload.photo_meta is not None:
+        log_entry["photo_meta"] = payload.photo_meta
     job.setdefault("production_logs", []).append(log_entry)
+    # Job-level objects: inspection + spec_baseline (warranty thresholds). Latest
+    # non-empty wins; pass through verbatim — never compute or guess a spec value.
+    if payload.inspection:
+        job["inspection"] = payload.inspection
+    if payload.spec_baseline:
+        job["spec_baseline"] = payload.spec_baseline
     pct = _production_pct_complete(job)
     job["pct_complete"] = pct
     # Auto-check margin alert (A11)
@@ -2462,12 +2559,18 @@ async def leads_webhook(payload: LeadWebhook):
     # name+address check below never catches their repeats — re-running a
     # backfill would duplicate every client. Match on the source id first.
     # str() both sides so an int id and a stringified id still compare equal.
+    # Scope marker (step 7a): public-Dominate clients carry data.scope so the
+    # dashboard can exclude them from Truline-only views. May be None. Set on
+    # every create/update path below so a re-seen lead keeps its scope current.
+    scope = (payload.data or {}).get("scope")
+
     brand_id = (payload.data or {}).get("dominate_brand_id")
     if brand_id is not None:
         for oid, opp in opportunities.items():
             if opp.get("dominate_brand_id") is not None and \
                     str(opp.get("dominate_brand_id")) == str(brand_id):
                 opp["last_seen"] = datetime.now().isoformat()
+                opp["scope"] = scope
                 save_db(db)
                 return {"status": "ok",
                         "message": "Duplicate lead — opportunity updated",
@@ -2482,6 +2585,7 @@ async def leads_webhook(payload: LeadWebhook):
         if ((opp.get("address") or "").lower() == address and
                 (opp.get("client_name") or "").lower() == client and address):
             opp["last_seen"] = datetime.now().isoformat()
+            opp["scope"] = scope
             save_db(db)
             return {"status": "ok", "message": "Duplicate lead — opportunity updated",
                     "opportunity_id": oid, "duplicate": True}
@@ -2504,6 +2608,9 @@ async def leads_webhook(payload: LeadWebhook):
     }
     if payload.data:
         opp.update({k: v for k, v in payload.data.items() if v not in (None, "")})
+    # Always record scope explicitly (may be None) so the dashboard can filter
+    # public-Dominate clients out of Truline views regardless of the data merge.
+    opp["scope"] = scope
     db.setdefault("opportunities", {})[opp_id] = opp
     save_db(db)
     return {"status": "ok", "opportunity_id": opp_id, "stage": "New Lead",
@@ -2875,15 +2982,13 @@ async def ar_send_reminder(invoice_id: str, current_user: dict = Depends(get_man
     email_status = sms_status = None
     if to_email:
         email_status = _send_email_or_log(db, to_email, subject, body, current_user["email"])
-    if to_phone and SMS_WEBHOOK_URL:
-        try:
-            import requests
-            requests.post(SMS_WEBHOOK_URL, json={"to": to_phone, "message": body,
-                          "sent_by": current_user["email"], "sent_at": now.isoformat()},
-                          timeout=10).raise_for_status()
-            sms_status = "sent"
-        except Exception as e:
-            sms_status = f"error: {e}"
+    if to_phone:
+        # Route through the SMS choke point: an unconfigured Zap or a failed send
+        # parks the reminder in the sms_outbox instead of dropping it silently.
+        _r = _sms_dispatch(db, {"to": to_phone, "message": body,
+                                "sent_by": current_user["email"],
+                                "sent_at": now.isoformat()})
+        sms_status = _r.get("status")
     inv.setdefault("reminders", []).append({"sent_by": current_user["email"],
         "sent_at": now.isoformat(), "email_status": email_status, "sms_status": sms_status})
     save_db(db)
@@ -4305,11 +4410,24 @@ def _cron_anomaly_scan():
     return {"anomalies_flagged": len(flags)}
 
 
+def _cron_suite_sync_heartbeat():
+    """Step 8a: in-hub heartbeat for the suite sync. The real cross-app sync runs
+    in the separate truhub-bridge service; this just stamps a last_tick the hub
+    dashboard can show so an operator can see the scheduler is alive."""
+    db = load_db()
+    now = datetime.now().isoformat()
+    db["sync_heartbeat"] = {"last_tick": now}
+    save_db(db)
+    return f"suite sync heartbeat recorded at {now}"
+
+
 _CRON_TASKS["compliance_scan"] = _cron_compliance_scan   # O52 rollup
 _CRON_TASKS["coi_scan"] = _cron_compliance_scan          # O46
 _CRON_TASKS["cert_scan"] = _cron_compliance_scan         # O51
 _CRON_TASKS["anomaly_scan"] = _cron_anomaly_scan         # I62
 _CRON_TASKS["flush_outbox"] = _flush_outbox_once         # outbox email retry
+_CRON_TASKS["flush_sms"] = _flush_sms_once               # sms outbox retry (7c)
+_CRON_TASKS["suite_sync_heartbeat"] = _cron_suite_sync_heartbeat  # in-hub heartbeat (8a)
 
 
 if __name__ == "__main__":
