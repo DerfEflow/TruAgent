@@ -32,7 +32,7 @@ storage. There is **no separate database server**.
   The chat is a **tool-calling agent**: it can answer questions *and* take
   actions (update job status / add notes → sync to Roofr, send email/SMS, look
   up jobs & financials), with financial tools gated to manager+ roles. The model
-  is set by the `OPENAI_MODEL` env var (default `gpt-5.5`); if that id is
+  is set by the `OPENAI_MODEL` env var (default `gpt-4o`); if that id is
   rejected it falls back automatically to `OPENAI_FALLBACK_MODEL` (default
   `gpt-4o-mini`) so a bad id can't take chat down. The client is created lazily —
   with no `OPENAI_API_KEY` set, the app still boots and the chat politely says

@@ -9,6 +9,8 @@ import os
 import hashlib
 import json
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from openai import OpenAI
@@ -85,9 +87,10 @@ ESIGN_WEBHOOK_URL = os.getenv("ESIGN_WEBHOOK_URL", "")
 ESIGN_SECRET = _door_secret("ESIGN_SECRET", "change_esign_secret_in_production")
 
 # AI model is configurable so a bad/unavailable id never requires a code change.
-# Default is the id confirmed working on this account; a known-good fallback is
-# used automatically if the primary id is rejected (see _create_completion).
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
+# Default is a current, known-good id; a fallback (OPENAI_FALLBACK_MODEL) is used
+# automatically if the primary id is rejected (see _create_completion). Override
+# with the OPENAI_MODEL env var to track newer models without a code change.
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini")
 
 ADMIN_EMAIL = "fred@trulineroofing.com"
@@ -203,6 +206,8 @@ def _seed_db() -> dict:
         "doc_chunks": {},
         "cron_log": [],
         "pending_voice_reports": [],
+        "outbox": [],
+        "sms_outbox": [],
         "users": {
             "fred@trulineroofing.com": {
                 "email": "fred@trulineroofing.com",
@@ -261,6 +266,13 @@ def _normalize_db(db) -> bool:
     if "pending_voice_reports" not in db:
         db["pending_voice_reports"] = []
         needs_migration = True
+    # Outbound queues (email + SMS). Backfilled as lists on older db.json files so
+    # they always exist alongside the setdefault() in the dispatch helpers and the
+    # GET /outbox + flush endpoints.
+    for _list_key in ("outbox", "sms_outbox"):
+        if _list_key not in db:
+            db[_list_key] = []
+            needs_migration = True
     if not db.get("weather_profiles"):
         db["weather_profiles"] = {k: dict(v) for k, v in _DEFAULT_WEATHER_PROFILES.items()}
         needs_migration = True
@@ -366,6 +378,13 @@ def load_db():
 
     return _seed_db()
 
+# Serialises concurrent writers to the file backend. Uvicorn runs a single async
+# worker, but synchronous cron-task handlers block that loop and can interleave a
+# load->modify->save with a door webhook's save. A threading.Lock keeps the
+# temp-file write + os.replace atomic across writers so db.json can't be clobbered
+# mid-flight. (PG mode upserts atomically and needs no lock.)
+_DB_WRITE_LOCK = threading.Lock()
+
 def save_db(data):
     if PG_ENABLED:
         _pg_save(data)
@@ -373,10 +392,11 @@ def save_db(data):
     # Atomic write: dump to a temp file in the same directory, then os.replace()
     # it over the target. A crash mid-write can't leave db.json half-written and
     # invalid (which would fail to load on the next boot).
-    tmp = db_file + ".tmp"
-    with open(tmp, 'w') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, db_file)
+    with _DB_WRITE_LOCK:
+        tmp = db_file + ".tmp"
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, db_file)
 
 security = HTTPBearer()
 
@@ -1901,18 +1921,58 @@ async def dashboard_summary(current_user: dict = Depends(get_current_user)):
     return _dashboard_summary(db, role)
 
 
+# In-process brute-force throttle for /login. Keyed by client IP, counts failed
+# attempts in a rolling window and returns 429 past the threshold. In-memory
+# (resets on restart) and per-process, which is sufficient for this single-worker
+# internal app; a shared store (e.g. Redis) would be the cross-process upgrade.
+_LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECS = 60
+
+def _client_ip(request: Request) -> str:
+    # Behind Railway's proxy the socket peer is the proxy, so prefer the first
+    # X-Forwarded-For hop (the real caller) for per-client throttling instead of
+    # lumping every user under one proxy IP and risking a global lockout. XFF is
+    # client-settable, so this is a brute-force speed-bump, not an authz control.
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def _login_rate_limit_check(ip: str):
+    now = time.time()
+    recent = [t for t in _LOGIN_ATTEMPTS.get(ip, []) if now - t < _LOGIN_WINDOW_SECS]
+    _LOGIN_ATTEMPTS[ip] = recent
+    if len(recent) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Wait a minute and try again.",
+        )
+
+def _login_record_failure(ip: str):
+    _LOGIN_ATTEMPTS.setdefault(ip, []).append(time.time())
+
+def _login_clear(ip: str):
+    _LOGIN_ATTEMPTS.pop(ip, None)
+
+
 @app.post("/login")
-async def login(data: Login):
+async def login(data: Login, request: Request):
+    ip = _client_ip(request)
+    _login_rate_limit_check(ip)
     db = load_db()
     user = db["users"].get(data.email)
     
     if not user:
+        _login_record_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
     hashed = hashlib.sha256(data.password.encode()).hexdigest()
     if user["password_hash"] != hashed:
+        _login_record_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    _login_clear(ip)
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["email"], "role": user.get("role", "user")},
@@ -2573,10 +2633,19 @@ async def delete_user_access(email: str, current_user: dict = Depends(get_admin_
 
 @app.get("/admin/webhook-info")
 async def get_webhook_info(current_user: dict = Depends(get_admin_user)):
+    # Never return the live secret in the response body: it would land in proxy
+    # logs, browser history, and dev-tools. Surface only a short masked hint plus
+    # a configured/disabled flag so the operator can confirm which value is set
+    # without exposing it. The real value is set via the ZAPIER_SECRET env var.
+    _configured = bool(ZAPIER_SECRET) and not ZAPIER_SECRET.startswith("DISABLED_")
+    # Suffix-only hint (like card/last-4): confirms the right value is set without
+    # exposing a brute-force-helpful prefix.
+    _hint = ("****" + ZAPIER_SECRET[-4:]) if _configured else None
     return {
         "webhook_url": "/zapier/webhook",
-        "secret": ZAPIER_SECRET,
-        "instructions": "Include the 'secret' field in your Zapier webhook payload"
+        "secret_configured": _configured,
+        "secret_hint": _hint,
+        "instructions": "Include the 'secret' field (the value of the ZAPIER_SECRET env var) in your Zapier webhook payload"
     }
 
 @app.post("/users")
@@ -2838,8 +2907,13 @@ async def leads_webhook(payload: LeadWebhook):
 _CRON_TASKS: Dict[str, Any] = {}  # registered task handlers (set in later sections)
 
 @app.post("/cron/tick")
-async def cron_tick(task: str = "noop", secret: str = ""):
-    if secret != CRON_SECRET:
+async def cron_tick(request: Request, task: str = "noop", secret: str = ""):
+    # Prefer the secret from the X-Cron-Secret header so it never lands in access
+    # logs as a ?secret= query param. The query param is kept as a fallback for
+    # callers that can't set headers; update the Railway cron job to send the
+    # header and drop the query string.
+    provided = request.headers.get("X-Cron-Secret") or secret
+    if provided != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid cron secret")
     log_entry = {"task": task, "fired_at": datetime.now().isoformat(), "result": None}
     handler = _CRON_TASKS.get(task)
@@ -4466,9 +4540,10 @@ Return JSON with these fields (omit fields not mentioned):
 @app.post("/cron/digest")
 async def send_digest(request: Request, secret: str = ""):
     """I59: Morning ops digest. Two auth modes: a logged-in user's JWT (digest
-    goes to that user, scoped to their role), or the CRON_SECRET as ?secret=
-    (scheduled callers like Railway cron / Zapier Schedule — digest goes to the
-    super admin)."""
+    goes to that user, scoped to their role), or the CRON_SECRET via the
+    X-Cron-Secret header (preferred) or ?secret= query fallback (scheduled
+    callers like Railway cron / Zapier Schedule — digest goes to the super
+    admin)."""
     current_user = None
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -4480,7 +4555,8 @@ async def send_digest(request: Request, secret: str = ""):
         except JWTError:
             current_user = None
     if current_user is None:
-        if secret and secret == CRON_SECRET:
+        provided_secret = request.headers.get("X-Cron-Secret") or secret
+        if provided_secret and provided_secret == CRON_SECRET:
             db_users = load_db().get("users", {})
             admin_email = next((e for e, u in db_users.items()
                                 if u.get("role") == "super_admin"), "fred@trulineroofing.com")
