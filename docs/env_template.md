@@ -25,6 +25,7 @@ dormant — the app runs and is fully reviewable without any of them.
 | `OPENAI_MODEL` | Which OpenAI chat model the AI agent uses | Optional | Defaults to `gpt-4o`; falls back to `OPENAI_FALLBACK_MODEL` if rejected |
 | `OPENAI_FALLBACK_MODEL` | Known-good model used if `OPENAI_MODEL` is unavailable | Optional | Defaults to `gpt-4o-mini` |
 | `DATA_DIR` | Folder holding `db.json` + uploaded `documents/` | **Production: set to a mounted persistent volume** (e.g. `/data` on Railway) so data survives redeploys | Defaults to the project folder (fine for local dev; **ephemeral on Railway if left unset**) |
+| `SCHEDULER_ENABLED` | Built-in in-process scheduler that runs the db-only scans on a timer (compliance + anomaly scans daily, hub heartbeat hourly) — no external cron needed; last-run stamps persist in `db.json` so it's restart-safe | Optional | Defaults to **on**; set to `0` to disable (e.g. if you switch to an external cron driving `/cron/tick`) |
 
 ## Generating strong secret values
 

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import asyncio
 import os
 import hashlib
 import json
@@ -4718,6 +4719,78 @@ _CRON_TASKS["anomaly_scan"] = _cron_anomaly_scan         # I62
 _CRON_TASKS["flush_outbox"] = _flush_outbox_once         # outbox email retry
 _CRON_TASKS["flush_sms"] = _flush_sms_once               # sms outbox retry (7c)
 _CRON_TASKS["suite_sync_heartbeat"] = _cron_suite_sync_heartbeat  # in-hub heartbeat (8a)
+
+
+# ─── In-process scheduler (built-in scheduled scans) ─────────────────────────
+# TruAgent runs as a single always-on uvicorn worker, so a lightweight asyncio
+# loop is enough to fire the db-only scans on a timer — no external cron service
+# is needed. Last-run stamps are persisted in db.json (scheduler_runs) so a
+# restart never double-fires and a daily job still fires about once per day even
+# across restarts. The email-dependent tasks (flush_outbox / flush_sms and the
+# /cron/digest) are intentionally NOT scheduled here — they stay dormant until an
+# EMAIL_/SMS_WEBHOOK_URL is set; add them to _SCHEDULE once those are live. The
+# /cron/tick endpoint stays available for manual/external triggering (header-
+# authed). Disable this loop entirely with SCHEDULER_ENABLED=0.
+_SCHEDULE = [
+    # (task_name registered in _CRON_TASKS, interval_seconds)
+    ("compliance_scan", 24 * 3600),   # COI/cert/SDS expiry rollup -> compliance_alerts
+    ("anomaly_scan", 24 * 3600),      # margin/gallon anomaly flags -> anomaly_snapshot
+    ("suite_sync_heartbeat", 3600),   # hub liveness marker -> sync_heartbeat
+]
+_SCHEDULER_TICK_SECS = 300  # re-check for due jobs every 5 minutes
+
+
+def _run_due_scheduled_tasks():
+    """Run any scheduled task whose interval has elapsed; persist last-run stamps
+    in db.json so it is restart-safe. Synchronous (runs in a worker thread).
+    Returns a list of (task_name, result) for whatever fired this tick."""
+    snapshot = load_db()
+    stamps = dict(snapshot.get("scheduler_runs", {}))
+    now = datetime.now()
+    ran = []
+    for task_name, interval in _SCHEDULE:
+        last = stamps.get(task_name)
+        if last:
+            try:
+                if (now - datetime.fromisoformat(last)).total_seconds() < interval:
+                    continue
+            except (ValueError, TypeError):
+                pass  # unparseable stamp -> treat as due
+        handler = _CRON_TASKS.get(task_name)
+        if not handler:
+            continue
+        try:
+            result = handler()  # each handler does its own load_db()/save_db()
+        except Exception as e:
+            result = f"error: {e}"
+        # Re-read AFTER the handler saved so we don't clobber its write, then
+        # stamp this run.
+        db = load_db()
+        db.setdefault("scheduler_runs", {})[task_name] = now.isoformat()
+        save_db(db)
+        ran.append((task_name, result))
+    return ran
+
+
+async def _scheduler_loop():
+    await asyncio.sleep(10)  # let the app finish booting before the first tick
+    while True:
+        try:
+            for task_name, result in await asyncio.to_thread(_run_due_scheduled_tasks):
+                print(f"[scheduler] ran {task_name}: {result}", flush=True)
+        except Exception as e:
+            print(f"[scheduler] tick error: {e}", flush=True)
+        await asyncio.sleep(_SCHEDULER_TICK_SECS)
+
+
+@app.on_event("startup")
+async def _start_scheduler():
+    if os.getenv("SCHEDULER_ENABLED", "1") == "0":
+        print("[scheduler] disabled (SCHEDULER_ENABLED=0)", flush=True)
+        return
+    asyncio.create_task(_scheduler_loop())
+    print("[scheduler] started — compliance_scan/anomaly_scan daily, "
+          "suite_sync_heartbeat hourly", flush=True)
 
 
 if __name__ == "__main__":
