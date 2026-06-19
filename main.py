@@ -2907,12 +2907,12 @@ async def leads_webhook(payload: LeadWebhook):
 _CRON_TASKS: Dict[str, Any] = {}  # registered task handlers (set in later sections)
 
 @app.post("/cron/tick")
-async def cron_tick(request: Request, task: str = "noop", secret: str = ""):
-    # Prefer the secret from the X-Cron-Secret header so it never lands in access
-    # logs as a ?secret= query param. The query param is kept as a fallback for
-    # callers that can't set headers; update the Railway cron job to send the
-    # header and drop the query string.
-    provided = request.headers.get("X-Cron-Secret") or secret
+async def cron_tick(request: Request, task: str = "noop"):
+    # Secret is accepted ONLY via the X-Cron-Secret header, never a ?secret=
+    # query param (which would land in proxy/access logs). The query fallback was
+    # removed after prod logs confirmed no caller used it, so this closes G12 for
+    # good: a secret placed in the URL simply won't authenticate.
+    provided = request.headers.get("X-Cron-Secret")
     if provided != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid cron secret")
     log_entry = {"task": task, "fired_at": datetime.now().isoformat(), "result": None}
@@ -4538,12 +4538,12 @@ Return JSON with these fields (omit fields not mentioned):
             "message": "Review and confirm — POST /production/webhook with PRODUCTION_SECRET to save"}
 
 @app.post("/cron/digest")
-async def send_digest(request: Request, secret: str = ""):
+async def send_digest(request: Request):
     """I59: Morning ops digest. Two auth modes: a logged-in user's JWT (digest
     goes to that user, scoped to their role), or the CRON_SECRET via the
-    X-Cron-Secret header (preferred) or ?secret= query fallback (scheduled
-    callers like Railway cron / Zapier Schedule — digest goes to the super
-    admin)."""
+    X-Cron-Secret header (scheduled callers like a Railway cron / Zapier
+    Schedule — digest goes to the super admin). The secret is header-only; it is
+    never read from a ?secret= query param, so it can't leak into access logs."""
     current_user = None
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -4555,7 +4555,7 @@ async def send_digest(request: Request, secret: str = ""):
         except JWTError:
             current_user = None
     if current_user is None:
-        provided_secret = request.headers.get("X-Cron-Secret") or secret
+        provided_secret = request.headers.get("X-Cron-Secret")
         if provided_secret and provided_secret == CRON_SECRET:
             db_users = load_db().get("users", {})
             admin_email = next((e for e, u in db_users.items()

@@ -14,8 +14,8 @@ real db.json) with known test door secrets, and asserts:
       secret (write path) — the fail-closed contract.
   role  field crew (user) cannot read /job/{id}/financials; manager can.
   T3  POST /login is rate-limited (429 after 5 failures from one IP).
-  T4  /cron/tick authenticates via the X-Cron-Secret header (and the ?secret=
-      query fallback), and rejects a bad/missing secret with 403.
+  T4  /cron/tick authenticates via the X-Cron-Secret header ONLY (the legacy
+      ?secret= query is rejected), and rejects a bad/missing secret with 403.
   T7  save_db is guarded by a module-level write lock.
   T8  _normalize_db backfills outbox/sms_outbox as lists on an old db.
 """
@@ -126,8 +126,8 @@ def run():
     print("-- T4: cron secret via header + query fallback, bad -> 403 --")
     check(client.post("/cron/tick", headers={"X-Cron-Secret": "test-cron-secret"}).status_code == 200,
           "/cron/tick with X-Cron-Secret header -> 200")
-    check(client.post("/cron/tick?secret=test-cron-secret").status_code == 200,
-          "/cron/tick with ?secret= query fallback -> 200")
+    check(client.post("/cron/tick?secret=test-cron-secret").status_code == 403,
+          "/cron/tick with legacy ?secret= query is now rejected (header-only) -> 403")
     check(client.post("/cron/tick", headers={"X-Cron-Secret": "nope"}).status_code == 403,
           "/cron/tick with wrong header -> 403")
     check(client.post("/cron/tick").status_code == 403,
