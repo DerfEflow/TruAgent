@@ -87,6 +87,10 @@ ESIGN_WEBHOOK_URL = os.getenv("ESIGN_WEBHOOK_URL", "")
 # outbound ESIGN_WEBHOOK_URL above.
 ESIGN_SECRET = _door_secret("ESIGN_SECRET", "change_esign_secret_in_production")
 
+# Shared secret for the inbound comms door (P2-10): a Zapier email-parser / Gmail
+# trigger and a Twilio inbound-SMS webhook POST incoming customer messages here.
+INBOX_SECRET = _door_secret("INBOX_SECRET", "change_inbox_secret_in_production")
+
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is a current, known-good id; a fallback (OPENAI_FALLBACK_MODEL) is used
 # automatically if the primary id is rejected (see _create_completion). Override
@@ -747,6 +751,23 @@ class ReferralRequest(BaseModel):
     referred_name: str                       # the new prospect
     referred_contact: Optional[str] = None   # phone/email of the prospect
     notes: Optional[str] = None
+
+class InboxWebhook(BaseModel):
+    secret: str
+    channel: str = "email"              # email | sms
+    contact: Optional[str] = None       # the customer's email/phone (the sender)
+    name: Optional[str] = None          # sender display name, if known
+    to: Optional[str] = None            # which inbox/number it came in on
+    subject: Optional[str] = None
+    body: str = ""
+    data: Optional[dict] = None
+
+class InboxSend(BaseModel):
+    channel: str = "email"              # email | sms
+    to: str
+    subject: Optional[str] = None
+    body: str
+    job_id: Optional[str] = None
 
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
@@ -4106,6 +4127,145 @@ async def opp_timeline(opportunity_id: str, current_user: dict = Depends(get_cur
     return {"status": "ok", "opportunity_id": opportunity_id,
             "timeline": opp.get("timeline", []),
             "cadence_log": opp.get("cadence_log", [])}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2-10 — Unified communications inbox (email + SMS, threaded per contact/job)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Messages live in db["messages"] keyed by id. A "thread" is all messages sharing
+# a normalized contact (email lowercased / phone last-10-digits), channel-prefixed
+# so an email and a phone never collide. Inbound arrives via the secret-checked
+# /inbox/webhook (Zapier email-parser / Twilio inbound SMS). Outbound goes through
+# the existing email/SMS dispatch (dormant-safe: queues until the webhook is set).
+
+def _thread_key(channel: str, contact: str) -> str:
+    c = (contact or "").strip().lower()
+    if channel == "sms":
+        digits = "".join(ch for ch in c if ch.isdigit())
+        return "sms:" + (digits[-10:] if digits else "unknown")
+    return "email:" + (c if c else "unknown")
+
+
+def _match_contact(db: dict, channel: str, contact: str):
+    """Best-effort link of a contact to an existing job and/or opportunity."""
+    key = _thread_key(channel, contact)
+    jf = "customer_phone" if channel == "sms" else "customer_email"
+    of = "phone" if channel == "sms" else "email"
+    job_id = next((jid for jid, j in db.get("jobs", {}).items()
+                   if j.get(jf) and _thread_key(channel, j[jf]) == key), None)
+    opp_id = next((oid for oid, o in db.get("opportunities", {}).items()
+                   if o.get(of) and _thread_key(channel, o[of]) == key), None)
+    return job_id, opp_id
+
+
+def _record_message(db: dict, *, channel, direction, contact, body,
+                    subject=None, name=None, by=None, status):
+    job_id, opp_id = _match_contact(db, channel, contact or "")
+    mid = f"msg_{int(datetime.now().timestamp() * 1000)}_{len(db.get('messages', {}))}"
+    msg = {"id": mid, "channel": channel, "direction": direction,
+           "contact": contact, "name": name, "subject": subject, "body": body,
+           "thread_key": _thread_key(channel, contact or ""),
+           "job_id": job_id, "opportunity_id": opp_id,
+           "status": status, "at": datetime.now().isoformat(), "by": by}
+    db.setdefault("messages", {})[mid] = msg
+    return msg
+
+
+@app.post("/inbox/webhook")
+async def inbox_webhook(payload: InboxWebhook):
+    """P2-10 inbound door: record an incoming customer email/SMS into the inbox."""
+    if payload.secret != INBOX_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid inbox webhook secret")
+    db = load_db()
+    contact = payload.contact or (payload.data or {}).get("from")
+    msg = _record_message(db, channel=payload.channel, direction="inbound",
+                          contact=contact, body=payload.body, subject=payload.subject,
+                          name=payload.name, status="unread")
+    save_db(db)
+    return {"status": "ok", "message_id": msg["id"], "thread_key": msg["thread_key"],
+            "linked_job": msg["job_id"], "linked_opportunity": msg["opportunity_id"]}
+
+
+@app.post("/inbox/send")
+async def inbox_send(req: InboxSend, current_user: dict = Depends(get_manager_or_above)):
+    """P2-10 outbound: send an email/SMS and record it in the thread. Sending is
+    dormant-safe — it queues in the outbox until EMAIL_/SMS_WEBHOOK_URL is set."""
+    db = load_db()
+    if req.channel == "sms":
+        result = _sms_dispatch(db, {"to": req.to, "message": req.body,
+                                    "sent_by": current_user["email"],
+                                    "sent_at": datetime.now().isoformat()})
+    else:
+        result = _email_dispatch(db, {"to": req.to, "subject": req.subject or "(no subject)",
+                                      "body": req.body, "sent_by": current_user["email"],
+                                      "sent_at": datetime.now().isoformat()})
+    status = "sent" if result.get("status") == "ok" else "queued"
+    msg = _record_message(db, channel=req.channel, direction="outbound",
+                          contact=req.to, body=req.body, subject=req.subject,
+                          by=current_user["email"], status=status)
+    save_db(db)
+    return {"status": "ok", "dispatch": result, "message_id": msg["id"],
+            "thread_key": msg["thread_key"]}
+
+
+@app.get("/inbox")
+async def inbox_threads(current_user: dict = Depends(get_manager_or_above)):
+    """P2-10: list threads (grouped by contact), newest first, with unread counts."""
+    db = load_db()
+    threads: Dict[str, dict] = {}
+    for m in db.get("messages", {}).values():
+        tk = m["thread_key"]
+        t = threads.setdefault(tk, {"thread_key": tk, "channel": m["channel"],
+            "contact": m.get("contact"), "name": m.get("name"), "job_id": m.get("job_id"),
+            "opportunity_id": m.get("opportunity_id"), "count": 0, "unread": 0,
+            "last_at": "", "last_snippet": "", "last_direction": ""})
+        t["count"] += 1
+        if m["direction"] == "inbound" and m.get("status") == "unread":
+            t["unread"] += 1
+        if (m.get("at") or "") >= t["last_at"]:
+            t["last_at"] = m.get("at") or ""
+            t["last_snippet"] = (m.get("body") or "")[:90]
+            t["last_direction"] = m["direction"]
+            t["name"] = m.get("name") or t["name"]
+        t["job_id"] = t["job_id"] or m.get("job_id")
+        t["opportunity_id"] = t["opportunity_id"] or m.get("opportunity_id")
+    for t in threads.values():
+        if t["job_id"] and t["job_id"] in db.get("jobs", {}):
+            t["client_name"] = db["jobs"][t["job_id"]].get("client_name")
+        elif t["opportunity_id"] and t["opportunity_id"] in db.get("opportunities", {}):
+            t["client_name"] = db["opportunities"][t["opportunity_id"]].get("client_name")
+        else:
+            t["client_name"] = t.get("name")
+    ordered = sorted(threads.values(), key=lambda x: x["last_at"], reverse=True)
+    return {"status": "ok", "threads": ordered,
+            "total_unread": sum(t["unread"] for t in ordered)}
+
+
+@app.get("/inbox/thread")
+async def inbox_thread(key: str, current_user: dict = Depends(get_manager_or_above)):
+    """P2-10: all messages in one thread (oldest first)."""
+    db = load_db()
+    msgs = sorted([m for m in db.get("messages", {}).values() if m["thread_key"] == key],
+                  key=lambda m: m.get("at") or "")
+    if not msgs:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"status": "ok", "thread_key": key, "messages": msgs,
+            "job_id": next((m["job_id"] for m in msgs if m.get("job_id")), None),
+            "opportunity_id": next((m["opportunity_id"] for m in msgs if m.get("opportunity_id")), None)}
+
+
+@app.post("/inbox/thread/read")
+async def inbox_mark_read(key: str, current_user: dict = Depends(get_manager_or_above)):
+    """P2-10: mark every unread inbound message in a thread as read."""
+    db = load_db()
+    n = 0
+    for m in db.get("messages", {}).values():
+        if m["thread_key"] == key and m["direction"] == "inbound" and m.get("status") == "unread":
+            m["status"] = "read"
+            n += 1
+    if n:
+        save_db(db)
+    return {"status": "ok", "marked_read": n}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -62,6 +62,22 @@ JS `node --check` clean; Python `py_compile` clean.
 **Phase 1 = DONE.** Connections still Fred-gated before some of this *sends* externally: EMAIL_/SMS
 webhooks (cadence/review actually emailing), QuickBooks Zaps. See `CRM-ROADMAP.md` §3.
 
-**Next session — Phase 2.** Start at **P2-9 (customer/contact entity)** or **P2-10 (unified comms inbox**,
-the biggest day-to-day gap; also needs the EMAIL_/SMS inbound door + Fred connecting Gmail/Twilio). See §5.
+---
+
+## 2026-06-22 (cont.) — P2-10 unified comms inbox DONE
+
+- Backend: `INBOX_SECRET` door; `db.messages` store; helpers `_thread_key` (email lc / phone last-10,
+  channel-prefixed) + `_match_contact` (links a message to a job/opp by customer email/phone) +
+  `_record_message`. Endpoints: `POST /inbox/webhook` (inbound, secret), `POST /inbox/send` (manager+,
+  via dormant-safe email/SMS dispatch), `GET /inbox` (threads + unread), `GET /inbox/thread?key=`,
+  `POST /inbox/thread/read?key=`. Models `InboxWebhook` / `InboxSend`.
+- Frontend: "Inbox" tab (manager-only) — thread list (unread badges) + thread view (bubbles) + reply box.
+- Verified (TestClient): inbound email auto-links job; bad secret 403; outbound queues; threads + unread;
+  thread view; mark-read; field-crew 403; SMS inbound links opp by normalized phone. node --check + py_compile clean.
+- **Fred-gated to go live:** set `INBOX_SECRET` + `EMAIL_WEBHOOK_URL` + `SMS_WEBHOOK_URL` on Railway, and wire
+  a Zapier email-parser (→ /inbox/webhook channel=email) + Twilio inbound-SMS (→ channel=sms). Until then the
+  inbox UI works and shows threads but nothing flows in/out automatically.
+
+**Next session — Phase 2 cont.** P2-9 (customer/contact entity), P2-11 (material ordering from estimate),
+P2-12 (stage-change automation), P2-13 (source/ROI). See `CRM-ROADMAP.md` §5.
 

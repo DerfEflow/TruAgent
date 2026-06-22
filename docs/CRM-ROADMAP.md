@@ -57,7 +57,7 @@ endpoint must declare its dependency (`Depends(get_manager_or_above)` etc.).
 | QuickBooks | inbound | Zapier (2 Zaps) → `/quickbooks/webhook` | `QUICKBOOKS_SECRET` | 🔲 needs Fred OAuth + Zaps (see `docs/CONNECT_QUICKBOOKS.md`) | job financials |
 | Email | outbound | Zapier → Gmail/SendGrid | `EMAIL_WEBHOOK_URL` | 🔲 needs Fred OAuth | cadence, review-ask, inbox send |
 | SMS | outbound | Zapier → Twilio | `SMS_WEBHOOK_URL` | 🔲 needs Fred OAuth | cadence, inbox send |
-| Email/SMS | **inbound** | Zapier email-parser / Twilio inbound → NEW door | `INBOX_SECRET` (new) | 🔲 NEW (Phase 2) | unified comms inbox |
+| Email/SMS | **inbound** | Zapier email-parser / Twilio inbound → `/inbox/webhook` | `INBOX_SECRET` | ⚙️ code LIVE; needs Fred to set `INBOX_SECRET` + wire the Zaps | unified comms inbox |
 | E-signature | both | `/pipeline/{id}/esign-send` + `/esign/webhook` | `ESIGN_WEBHOOK_URL`, `ESIGN_SECRET` | ⚠️ partial (no UI, url unset) | proposals |
 | 1ESX measurements | both | 1ESX REST API | `ESX_API_KEY` (new) | 🔲 NEW (Phase 3) | roof measurements |
 | Stripe payments | both | Stripe API + webhook | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (new) | 🔲 NEW (Phase 3) | collect payment |
@@ -90,8 +90,12 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 ## 5. Phase 2 — Build the genuine gaps (net-new)
 - [ ] **P2-9. Customer/contact entity.** First-class `customers` with many contacts, linked to jobs/opps
   (today customers are loose strings). Migration + UI + link from jobs/opps.
-- [ ] **P2-10. Unified comms inbox.** Inbound email/SMS capture (new door) + threaded per customer/job +
-  send from thread. Absorbs the parked outbound email/SMS wiring. *Biggest day-to-day gap vs Roofr.*
+- [x] **P2-10. Unified comms inbox** *(DONE 2026-06-22)*. Inbound email/SMS door `POST /inbox/webhook`
+  (secret `INBOX_SECRET`) → `db.messages`, auto-linked to job/opp by contact; threaded per contact
+  (`GET /inbox`, `GET /inbox/thread`, `POST /inbox/thread/read`); send from thread `POST /inbox/send`
+  (manager+, dormant-safe via email/SMS outbox). UI: "Inbox" tab (manager-only), thread list + reply.
+  *Sending/receiving live needs Fred: set EMAIL_/SMS_WEBHOOK_URL + INBOX_SECRET, wire Zapier email-parser
+  + Twilio inbound (see §3).*
 - [ ] **P2-11. Material ordering from estimate.** Generate a PO/order from Alpha `est_gallons` → email to supplier.
 - [ ] **P2-12. Stage-change automation.** Rules engine: stage X → create task / notify rep / start cadence.
 - [ ] **P2-13. Lead-source attribution / ROI.** Win-rate + revenue by source (extends win/loss rollups).

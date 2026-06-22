@@ -1203,3 +1203,30 @@ select {
   font-size: 1.15rem;
 }
 .app-card:hover .app-card-arrow { color: var(--green-hi); }
+
+/* ═══════════════════════════ INBOX (P2-10) ═════════════════ */
+.inbox-layout { display: flex; gap: 1rem; align-items: flex-start; }
+.inbox-threads {
+  flex: 0 0 290px;
+  max-height: 72vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+}
+.inbox-thread-view {
+  flex: 1; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.75rem;
+}
+.inbox-thread-item {
+  padding: 0.55rem 0.65rem; border-bottom: 1px solid var(--border);
+  border-left: 3px solid transparent; cursor: pointer;
+}
+.inbox-thread-item:hover { background: var(--panel-hi); }
+.inbox-thread-item.unread { border-left-color: var(--green-hi); }
+.inbox-badge {
+  background: var(--green); color: var(--white); border-radius: 10px;
+  font-size: 0.7rem; padding: 0 7px; height: 18px; line-height: 18px;
+}
+@media (max-width: 640px) {
+  .inbox-layout { flex-direction: column; }
+  .inbox-threads { flex: 1 1 auto; width: 100%; max-height: 40vh; }
+}

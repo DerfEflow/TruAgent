@@ -137,6 +137,8 @@ function showTab(tabName, btn) {
   if (tabName === 'documents') refreshDocuments();
   if (tabName === 'financials') refreshFinancials();
   if (tabName === 'admin') loadUsers();
+  if (tabName === 'pipeline') refreshPipeline();
+  if (tabName === 'inbox') refreshInbox();
 }
 
 function showLoading(show) {
@@ -1260,6 +1262,79 @@ async function logFollowup(oppId) {
     closeOppDetail();
     refreshPipeline();
   } catch (e) { alert('Failed to log follow-up: ' + e.message); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBOX TAB  (P2-10 unified comms)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _currentThread = null;
+
+async function refreshInbox() {
+  const listEl = document.getElementById('inbox-threads');
+  try {
+    const r = await apiCall('/inbox');
+    const threads = r.threads || [];
+    if (!threads.length) {
+      listEl.innerHTML = '<p class="help-text" style="padding:.5rem">No messages yet. Inbound email/SMS will appear here once the inbox door is wired.</p>';
+      return;
+    }
+    listEl.innerHTML = threads.map(t => `
+      <div class="inbox-thread-item${t.unread ? ' unread' : ''}" onclick="openInboxThread('${t.thread_key}')">
+        <div style="display:flex;justify-content:space-between;gap:.5rem">
+          <strong style="font-size:.85rem">${esc(t.client_name || t.contact || 'Unknown')}</strong>
+          ${t.unread ? `<span class="inbox-badge">${t.unread}</span>` : ''}
+        </div>
+        <div class="help-text" style="font-size:.75rem">${t.channel === 'sms' ? '&#128241;' : '&#9993;'} ${esc(t.contact || '')}</div>
+        <div class="help-text" style="font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.last_direction === 'outbound' ? '&rarr; ' : ''}${esc(t.last_snippet || '')}</div>
+      </div>`).join('');
+  } catch (e) {
+    listEl.innerHTML = `<p class="error-message">Failed to load inbox: ${e.message}</p>`;
+  }
+}
+
+async function openInboxThread(key) {
+  _currentThread = key;
+  const el = document.getElementById('inbox-thread-view');
+  el.innerHTML = '<p class="help-text">Loading…</p>';
+  try {
+    const r = await apiCall('/inbox/thread?key=' + encodeURIComponent(key));
+    const msgs = r.messages || [];
+    const channel = (msgs[0] || {}).channel || 'email';
+    const contact = (msgs.find(m => m.direction === 'inbound') || msgs[0] || {}).contact || '';
+    const bubbles = msgs.map(m => `
+      <div style="margin:.4rem 0;display:flex;${m.direction === 'outbound' ? 'justify-content:flex-end' : ''}">
+        <div style="max-width:80%;background:${m.direction === 'outbound' ? 'var(--green-dim)' : 'var(--panel-hi)'};border:1px solid var(--border);border-radius:8px;padding:.5rem .65rem">
+          ${m.subject ? `<div style="font-weight:600;font-size:.8rem">${esc(m.subject)}</div>` : ''}
+          <div style="font-size:.85rem;white-space:pre-wrap">${esc(m.body || '')}</div>
+          <div class="help-text" style="font-size:.68rem;margin-top:.2rem">${m.direction === 'outbound' ? 'You' : esc(m.name || contact)} &middot; ${esc((m.at || '').slice(0, 16))}${m.status === 'queued' ? ' &middot; queued' : ''}</div>
+        </div>
+      </div>`).join('');
+    el.innerHTML = `
+      <div style="font-weight:600;margin-bottom:.5rem">${channel === 'sms' ? '&#128241; SMS' : '&#9993; Email'} &middot; ${esc(contact)}</div>
+      <div style="max-height:50vh;overflow:auto;padding-right:.25rem">${bubbles}</div>
+      <div style="margin-top:.6rem;display:flex;gap:.4rem;align-items:flex-end">
+        <textarea id="inbox-reply" rows="2" placeholder="Type a reply…" style="flex:1"></textarea>
+        <button class="btn-primary" onclick="sendInboxReply('${esc(channel)}','${esc(contact)}')">Send</button>
+      </div>
+      <p class="help-text" style="font-size:.72rem;margin-top:.3rem">Replies queue until the ${channel === 'sms' ? 'SMS' : 'email'} Zap is connected.</p>`;
+    if (r.messages.some(m => m.direction === 'inbound' && m.status === 'unread')) {
+      apiCall('/inbox/thread/read?key=' + encodeURIComponent(key), 'POST', {}).then(refreshInbox);
+    }
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Failed to load thread: ${e.message}</p>`;
+  }
+}
+
+async function sendInboxReply(channel, to) {
+  const ta = document.getElementById('inbox-reply');
+  const body = (ta.value || '').trim();
+  if (!body) { alert('Type a message first.'); return; }
+  try {
+    await apiCall('/inbox/send', 'POST', { channel, to, body, subject: 'Re: (Truline Roofing)' });
+    if (_currentThread) await openInboxThread(_currentThread);
+    refreshInbox();
+  } catch (e) { alert('Failed to send: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
