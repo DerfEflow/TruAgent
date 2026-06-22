@@ -39,7 +39,8 @@
     </header>
 
     <nav class="tabs">
-      <button class="tab active" onclick="showTab('ai-agent', this)">AI Agent</button>
+      <button class="tab active" onclick="showTab('apps', this)">Apps</button>
+      <button class="tab" onclick="showTab('ai-agent', this)">AI Agent</button>
       <button class="tab" onclick="showTab('jobs', this)">Jobs</button>
       <button class="tab" onclick="showTab('production', this)">Production</button>
       <button class="tab manager-only hidden" onclick="showTab('pipeline', this)">Pipeline</button>
@@ -53,8 +54,42 @@
 
     <main class="main-content">
 
+      <!-- APPS TAB (launcher) -->
+      <div id="apps-tab" class="tab-content active">
+        <div class="section-header">
+          <h2>Apps</h2>
+        </div>
+        <p class="apps-intro">Your Truline software suite &mdash; tap an app to open it in a new tab.</p>
+        <div class="apps-grid">
+          <a class="app-card" href="https://alphaestimator.com" target="_blank" rel="noopener">
+            <div class="app-icon app-icon-alpha">&#945;</div>
+            <div class="app-card-body">
+              <h3>Alpha Estimator</h3>
+              <p>Commercial roof-coating estimates &amp; quotes</p>
+            </div>
+            <span class="app-card-arrow">&#8599;</span>
+          </a>
+          <a class="app-card" href="https://delta-coating-production.up.railway.app" target="_blank" rel="noopener">
+            <div class="app-icon app-icon-delta">&#916;</div>
+            <div class="app-card-body">
+              <h3>Delta Coating Log</h3>
+              <p>Field daily logs, QA &amp; close-out reports</p>
+            </div>
+            <span class="app-card-arrow">&#8599;</span>
+          </a>
+          <a class="app-card" href="/static/dashboard.html">
+            <div class="app-icon app-icon-hub">&#9783;</div>
+            <div class="app-card-body">
+              <h3>Command Dashboard</h3>
+              <p>Cross-app jobs, field activity, leads &amp; financials</p>
+            </div>
+            <span class="app-card-arrow">&#8594;</span>
+          </a>
+        </div>
+      </div>
+
       <!-- AI AGENT TAB -->
-      <div id="ai-agent-tab" class="tab-content active">
+      <div id="ai-agent-tab" class="tab-content">
         <div class="chat-container">
           <div class="chat-header">
             <h2>AI ASSISTANT</h2>

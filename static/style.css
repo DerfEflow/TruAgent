@@ -1141,3 +1141,65 @@ select {
   margin-left: 8px;
   font-size: 9px;
 }
+
+/* ═══════════════════════════ APP LAUNCHER ═══════════════════ */
+.apps-intro {
+  color: var(--t2);
+  margin: 0 0 1.25rem;
+  font-size: 0.95rem;
+}
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.app-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.1rem 1.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-decoration: none;
+  color: var(--t1);
+  position: relative;
+  transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+}
+.app-card:hover {
+  border-color: var(--green);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--green-glow);
+}
+.app-icon {
+  flex: 0 0 52px;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 1.7rem;
+  font-weight: 700;
+  color: var(--white);
+  background: linear-gradient(145deg, var(--green-hi), var(--green));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+.app-icon-delta { background: linear-gradient(145deg, #3d88c6, #1f5f96); }
+.app-icon-hub   { background: linear-gradient(145deg, var(--amber), #b06f06); }
+.app-card-body { flex: 1; min-width: 0; }
+.app-card-body h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  color: var(--t1);
+}
+.app-card-body p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--t2);
+  line-height: 1.35;
+}
+.app-card-arrow {
+  color: var(--t2);
+  font-size: 1.15rem;
+}
+.app-card:hover .app-card-arrow { color: var(--green-hi); }
