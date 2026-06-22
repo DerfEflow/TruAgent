@@ -647,6 +647,12 @@ class PipelineStageUpdate(BaseModel):
     stage: str
     notes: Optional[str] = None
 
+class ConvertToJobRequest(BaseModel):
+    # Link to an existing job instead of creating one (optional). When omitted, a
+    # TruAgent-native job `opp-<opportunity_id>` is created from the opportunity.
+    link_job_id: Optional[str] = None
+    workflow_stage: Optional[str] = None   # initial stage for a newly created job
+
 class WinLossRequest(BaseModel):
     outcome: str    # "won" | "lost"
     loss_reason: Optional[str] = None   # price | tear_off | competitor | saturated | warranty_short | weather
@@ -3706,7 +3712,7 @@ async def get_pipeline(current_user: dict = Depends(get_current_user)):
     for oid, opp in db.get("opportunities", {}).items():
         s = opp.get("stage", "New Lead")
         entry = {k: opp.get(k) for k in ("id", "client_name", "address", "rep", "source",
-                                          "first_touch_at", "sla_due", "stage")}
+                                          "first_touch_at", "sla_due", "stage", "job_id")}
         if isManagerOrAbove := current_user.get("role") in ("manager", "super_admin"):
             entry["contract_value"] = opp.get("contract_value")
         by_stage.setdefault(s, []).append(entry)
@@ -3736,6 +3742,66 @@ async def advance_opp_stage(opportunity_id: str, req: PipelineStageUpdate,
                              "updated_at": datetime.now().isoformat()})
     save_db(db)
     return {"status": "ok", "opportunity_id": opportunity_id, "stage": req.stage}
+
+@app.post("/pipeline/{opportunity_id}/convert")
+async def convert_opportunity_to_job(opportunity_id: str, req: ConvertToJobRequest,
+                                     current_user: dict = Depends(get_manager_or_above)):
+    """P1-1: Convert/link an opportunity to a job — the keystone link between the
+    sales pipeline and production. Sets opp.job_id <-> job.origin_opportunity_id so
+    the Won-stage sync and e-sign auto-Won handoff (which both require opp.job_id)
+    actually fire. Idempotent: re-running returns the already-linked job."""
+    db = load_db()
+    opp = db.get("opportunities", {}).get(opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    jobs = db.setdefault("jobs", {})
+
+    # Already linked → no-op (idempotent).
+    existing = opp.get("job_id")
+    if existing and existing in jobs:
+        return {"status": "ok", "job_id": existing, "created": False,
+                "message": "Opportunity already linked to a job"}
+
+    created = False
+    if req.link_job_id:
+        if req.link_job_id not in jobs:
+            raise HTTPException(status_code=404, detail="link_job_id not found")
+        job_id = req.link_job_id
+    else:
+        job_id = f"opp-{opportunity_id}"
+        if job_id not in jobs:
+            jobs[job_id] = {
+                "job_id": job_id,
+                "client_name": opp.get("client_name"),
+                "address": opp.get("address"),
+                "customer_phone": opp.get("phone") or opp.get("customer_phone"),
+                "customer_email": opp.get("email") or opp.get("customer_email"),
+                "status": "Pending",
+                "workflow_stage": req.workflow_stage or opp.get("stage") or "Won",
+                "source": opp.get("source"),
+                "rep": opp.get("rep"),
+                "contract_value": opp.get("contract_value"),
+                "images": [],
+                "notes": [],
+                "created_by": current_user["email"],
+                "created_at": datetime.now().isoformat(),
+            }
+            created = True
+
+    # Establish the bidirectional link.
+    opp["job_id"] = job_id
+    jobs[job_id]["origin_opportunity_id"] = opportunity_id
+    now = datetime.now().isoformat()
+    opp.setdefault("timeline", []).append({
+        "event": "converted_to_job", "job_id": job_id, "created": created,
+        "by": current_user["email"], "at": now})
+    jobs[job_id].setdefault("notes", []).append({
+        "note": f"Linked from opportunity {opportunity_id}",
+        "added_by": current_user["email"], "added_at": now})
+    save_db(db)
+    return {"status": "ok", "job_id": job_id, "created": created,
+            "opportunity_id": opportunity_id,
+            "message": ("Job created and linked" if created else "Linked to existing job")}
 
 @app.delete("/pipeline/{opportunity_id}")
 async def delete_opportunity(opportunity_id: str,

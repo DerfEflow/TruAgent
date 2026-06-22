@@ -1096,6 +1096,11 @@ async function refreshPipeline() {
                 `<button onclick="moveOpp('${o.id}','${s}')" style="font-size:.7rem;padding:1px 5px" class="btn-secondary">${s.split(' ')[0]}</button>`
               ).join('')}
             </div>
+            <div style="margin-top:.35rem">
+              ${o.job_id
+                ? `<span style="font-size:.7rem;color:var(--green-hi)" title="${o.job_id}">&#10003; Job linked</span>`
+                : `<button onclick="convertOpp('${o.id}')" style="font-size:.7rem;padding:1px 6px" class="btn-primary">&rarr; Convert to Job</button>`}
+            </div>
           </div>`).join('')}
         </div>`;
     }
@@ -1120,6 +1125,15 @@ async function moveOpp(oppId, stage) {
     await apiCall(`/pipeline/${oppId}/stage`, 'PUT', { stage, notes: '' });
     refreshPipeline();
   } catch (e) { alert('Failed to move opportunity: ' + e.message); }
+}
+
+async function convertOpp(oppId) {
+  if (!confirm('Create a linked production job for this opportunity?')) return;
+  try {
+    const r = await apiCall(`/pipeline/${oppId}/convert`, 'POST', {});
+    alert(r.message || 'Converted to job');
+    refreshPipeline();
+  } catch (e) { alert('Failed to convert: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
