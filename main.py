@@ -769,6 +769,19 @@ class InboxSend(BaseModel):
     body: str
     job_id: Optional[str] = None
 
+class CustomerRequest(BaseModel):
+    name: str
+    company: Optional[str] = None
+    emails: List[str] = []
+    phones: List[str] = []
+    notes: Optional[str] = None
+
+class MaterialOrderRequest(BaseModel):
+    supplier: Optional[str] = None
+    waste_pct: Optional[float] = 10.0          # added to estimated gallons
+    extra_items: List[dict] = []               # [{product, quantity, unit}]
+    send_to: Optional[str] = None              # supplier email (dormant-safe send)
+
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
     permit_number: Optional[str] = None
@@ -3734,6 +3747,12 @@ async def set_warranty(job_id: str, req: WarrantyRequest,
 # S-phase — Sales, Estimating Pipeline & CRM
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# P2-12: days until the next follow-up is due when an opp enters each stage.
+_STAGE_FOLLOWUP_DAYS = {
+    "New Lead": 1, "Site Survey": 2, "Measured/Cores": 2,
+    "Estimating": 2, "Proposal": 2, "Negotiation": 3,
+}
+
 @app.get("/pipeline")
 async def get_pipeline(current_user: dict = Depends(get_current_user)):
     """S30: Sales pipeline — all opportunities by stage."""
@@ -3763,6 +3782,19 @@ async def advance_opp_stage(opportunity_id: str, req: PipelineStageUpdate,
         "event": "stage_changed", "from": old_stage, "to": req.stage,
         "notes": req.notes, "by": current_user["email"], "at": datetime.now().isoformat()
     })
+    # P2-12 stage-change automation: entering an active selling stage auto-schedules
+    # the next follow-up (drives the cadence engine + pipeline_alerts) so deals don't
+    # go cold. Won/Lost clear the follow-up clock.
+    if old_stage != req.stage:
+        if req.stage in ("Won", "Lost"):
+            opp.pop("next_followup_due", None)
+        else:
+            days = _STAGE_FOLLOWUP_DAYS.get(req.stage, 3)
+            due = (datetime.now() + timedelta(days=days)).isoformat()
+            opp["next_followup_due"] = due
+            opp.setdefault("timeline", []).append({
+                "event": "auto_followup_scheduled", "stage": req.stage,
+                "due_at": due, "by": "automation", "at": datetime.now().isoformat()})
     if req.stage == "Won" and opp.get("job_id"):
         job = db["jobs"].get(opp["job_id"])
         if job:
@@ -4266,6 +4298,151 @@ async def inbox_mark_read(key: str, current_user: dict = Depends(get_manager_or_
     if n:
         save_db(db)
     return {"status": "ok", "marked_read": n}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2-9 / P2-11 / P2-13 — Customers, material ordering, source ROI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _customer_links(db: dict, cust: dict):
+    """Jobs/opps/threads linked to a customer by any of its emails/phones."""
+    ekeys = {_thread_key("email", e) for e in cust.get("emails", []) if e}
+    pkeys = {_thread_key("sms", p) for p in cust.get("phones", []) if p}
+    jobs = []
+    for jid, j in db.get("jobs", {}).items():
+        if (j.get("customer_email") and _thread_key("email", j["customer_email"]) in ekeys) or \
+           (j.get("customer_phone") and _thread_key("sms", j["customer_phone"]) in pkeys):
+            jobs.append({"job_id": jid, "client_name": j.get("client_name"),
+                         "address": j.get("address"), "workflow_stage": j.get("workflow_stage"),
+                         "material_orders": len(j.get("material_orders", []))})
+    opps = []
+    for oid, o in db.get("opportunities", {}).items():
+        if (o.get("email") and _thread_key("email", o["email"]) in ekeys) or \
+           (o.get("phone") and _thread_key("sms", o["phone"]) in pkeys):
+            opps.append({"id": oid, "client_name": o.get("client_name"), "stage": o.get("stage")})
+    threads = sorted({m["thread_key"] for m in db.get("messages", {}).values()
+                      if m["thread_key"] in (ekeys | pkeys)})
+    return jobs, opps, threads
+
+
+def _customer_payload(req: CustomerRequest) -> dict:
+    return {"name": req.name, "company": req.company,
+            "emails": [e.strip() for e in req.emails if e and e.strip()],
+            "phones": [p.strip() for p in req.phones if p and p.strip()],
+            "notes": req.notes}
+
+
+@app.post("/customers")
+async def create_customer(req: CustomerRequest, current_user: dict = Depends(get_manager_or_above)):
+    """P2-9: create a first-class customer/contact record."""
+    db = load_db()
+    cid = f"cust_{int(datetime.now().timestamp() * 1000)}"
+    cust = {"id": cid, **_customer_payload(req),
+            "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    db.setdefault("customers", {})[cid] = cust
+    save_db(db)
+    return {"status": "ok", "customer": cust}
+
+
+@app.get("/customers")
+async def list_customers(current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    out = []
+    for c in db.get("customers", {}).values():
+        jobs, opps, threads = _customer_links(db, c)
+        out.append({**c, "job_count": len(jobs), "opp_count": len(opps), "thread_count": len(threads)})
+    out.sort(key=lambda x: (x.get("name") or "").lower())
+    return {"status": "ok", "customers": out}
+
+
+@app.get("/customer/{cid}")
+async def get_customer(cid: str, current_user: dict = Depends(get_manager_or_above)):
+    """P2-9: 360 view — the customer plus every linked job, opp, and message thread."""
+    db = load_db()
+    cust = db.get("customers", {}).get(cid)
+    if not cust:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    jobs, opps, threads = _customer_links(db, cust)
+    return {"status": "ok", "customer": cust, "jobs": jobs, "opportunities": opps, "threads": threads}
+
+
+@app.put("/customer/{cid}")
+async def update_customer(cid: str, req: CustomerRequest, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    cust = db.get("customers", {}).get(cid)
+    if not cust:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    cust.update(_customer_payload(req))
+    save_db(db)
+    return {"status": "ok", "customer": cust}
+
+
+@app.post("/job/{job_id}/material-order")
+async def create_material_order(job_id: str, req: MaterialOrderRequest,
+                                current_user: dict = Depends(get_manager_or_above)):
+    """P2-11: build a material order from the job's Alpha estimate (budget.est_gallons),
+    add a waste factor + any manual extras, and optionally email it to the supplier
+    (dormant-safe via the email outbox)."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    est = (job.get("budget") or {}).get("est_gallons") or {}
+    waste = (req.waste_pct or 0) / 100.0
+    line_items = [{"product": p, "estimated_gallons": round(float(g), 2),
+                   "order_gallons": round(float(g) * (1 + waste), 2), "unit": "gal"}
+                  for p, g in est.items() if g]
+    for it in (req.extra_items or []):
+        line_items.append({"product": it.get("product"), "order_gallons": it.get("quantity"),
+                           "unit": it.get("unit", "ea"), "manual": True})
+    order = {"id": f"mo_{int(datetime.now().timestamp() * 1000)}", "supplier": req.supplier,
+             "waste_pct": req.waste_pct, "line_items": line_items, "status": "draft",
+             "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    if req.send_to and line_items:
+        body = (f"Material order for {job.get('client_name') or job_id}"
+                f" ({job.get('address') or ''})\n\n"
+                + "\n".join(f"- {li['product']}: {li.get('order_gallons')} {li.get('unit')}" for li in line_items))
+        dispatch = _email_dispatch(db, {"to": req.send_to,
+                                        "subject": f"Material Order — {job.get('client_name') or job_id}",
+                                        "body": body, "sent_by": current_user["email"],
+                                        "sent_at": datetime.now().isoformat()})
+        order["status"] = "sent" if dispatch.get("status") == "ok" else "queued"
+        order["sent_to"] = req.send_to
+    job.setdefault("material_orders", []).append(order)
+    save_db(db)
+    return {"status": "ok", "order": order}
+
+
+@app.get("/job/{job_id}/material-orders")
+async def list_material_orders(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "material_orders": job.get("material_orders", [])}
+
+
+@app.get("/sales/source-roi")
+async def source_roi(current_user: dict = Depends(get_manager_or_above)):
+    """P2-13: lead-source attribution — leads/won/lost/win-rate/revenue by source."""
+    db = load_db()
+    by_source: Dict[str, dict] = {}
+    for opp in db.get("opportunities", {}).values():
+        src = opp.get("source") or "unknown"
+        d = by_source.setdefault(src, {"leads": 0, "won": 0, "lost": 0, "open": 0, "won_value": 0})
+        d["leads"] += 1
+        oc = opp.get("outcome")
+        if oc == "won":
+            d["won"] += 1
+            d["won_value"] += float(opp.get("contract_value") or 0)
+        elif oc == "lost":
+            d["lost"] += 1
+        else:
+            d["open"] += 1
+    for d in by_source.values():
+        tc = d["won"] + d["lost"]
+        d["win_rate_pct"] = round(d["won"] / tc * 100, 1) if tc else 0
+    return {"status": "ok", "by_source": by_source}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

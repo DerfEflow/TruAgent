@@ -88,7 +88,7 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 - [x] **P1-8. Opportunity/Job detail view.** Read the existing `timeline` + `comm-log` (both stored, neither shown).
 
 ## 5. Phase 2 — Build the genuine gaps (net-new)
-- [ ] **P2-9. Customer/contact entity.** First-class `customers` with many contacts, linked to jobs/opps
+- [x] **P2-9. Customer/contact entity.** First-class `customers` with many contacts, linked to jobs/opps
   (today customers are loose strings). Migration + UI + link from jobs/opps.
 - [x] **P2-10. Unified comms inbox** *(DONE 2026-06-22)*. Inbound email/SMS door `POST /inbox/webhook`
   (secret `INBOX_SECRET`) → `db.messages`, auto-linked to job/opp by contact; threaded per contact
@@ -96,9 +96,9 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
   (manager+, dormant-safe via email/SMS outbox). UI: "Inbox" tab (manager-only), thread list + reply.
   *Sending/receiving live needs Fred: set EMAIL_/SMS_WEBHOOK_URL + INBOX_SECRET, wire Zapier email-parser
   + Twilio inbound (see §3).*
-- [ ] **P2-11. Material ordering from estimate.** Generate a PO/order from Alpha `est_gallons` → email to supplier.
-- [ ] **P2-12. Stage-change automation.** Rules engine: stage X → create task / notify rep / start cadence.
-- [ ] **P2-13. Lead-source attribution / ROI.** Win-rate + revenue by source (extends win/loss rollups).
+- [x] **P2-11. Material ordering from estimate.** Generate a PO/order from Alpha `est_gallons` → email to supplier.
+- [x] **P2-12. Stage-change automation.** Rules engine: stage X → create task / notify rep / start cadence.
+- [x] **P2-13. Lead-source attribution / ROI.** Win-rate + revenue by source (extends win/loss rollups).
 
 ## 6. Phase 3 — The bigger build
 - [ ] **P3-14. 1ESX measurements integration** (order → parse XML area/parapet/penetrations → pre-fill Alpha). Brief §4.

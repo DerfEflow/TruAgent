@@ -44,6 +44,7 @@
       <button class="tab" onclick="showTab('jobs', this)">Jobs</button>
       <button class="tab" onclick="showTab('production', this)">Production</button>
       <button class="tab manager-only hidden" onclick="showTab('pipeline', this)">Pipeline</button>
+      <button class="tab manager-only hidden" onclick="showTab('customers', this)">Customers</button>
       <button class="tab manager-only hidden" onclick="showTab('inbox', this)">Inbox</button>
       <button class="tab manager-only hidden" onclick="showTab('schedule', this)">Schedule</button>
       <button class="tab" onclick="showTab('documents', this)">Documents</button>
@@ -163,6 +164,25 @@
           <h3>Renewals Due</h3>
         </div>
         <div id="renewals-content"></div>
+      </div>
+
+      <!-- CUSTOMERS TAB (P2-9) -->
+      <div id="customers-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Customers</h2>
+          <button onclick="showAddCustomer()" class="btn-primary">Add Customer</button>
+        </div>
+        <div id="add-customer-row" class="hidden" style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.75rem;margin-bottom:1rem">
+          <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+            <input id="cust-name" placeholder="Name" style="min-width:140px">
+            <input id="cust-company" placeholder="Company (optional)" style="min-width:140px">
+            <input id="cust-emails" placeholder="Emails (comma-sep)" style="min-width:160px;flex:1">
+            <input id="cust-phones" placeholder="Phones (comma-sep)" style="min-width:140px">
+            <button class="btn-primary" onclick="addCustomer()">Save</button>
+            <button class="btn-secondary" onclick="document.getElementById('add-customer-row').classList.add('hidden')">Cancel</button>
+          </div>
+        </div>
+        <div id="customers-list" class="jobs-list"></div>
       </div>
 
       <!-- INBOX TAB (P2-10 unified comms) -->

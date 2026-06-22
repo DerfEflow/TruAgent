@@ -78,6 +78,27 @@ webhooks (cadence/review actually emailing), QuickBooks Zaps. See `CRM-ROADMAP.m
   a Zapier email-parser (→ /inbox/webhook channel=email) + Twilio inbound-SMS (→ channel=sms). Until then the
   inbox UI works and shows threads but nothing flows in/out automatically.
 
-**Next session — Phase 2 cont.** P2-9 (customer/contact entity), P2-11 (material ordering from estimate),
-P2-12 (stage-change automation), P2-13 (source/ROI). See `CRM-ROADMAP.md` §5.
+---
+
+## 2026-06-22 (cont.) — Phase 2 COMPLETE (P2-9, P2-11, P2-12, P2-13)
+
+- **P2-9 customer/contact entity:** `db.customers` + `CustomerRequest`; `POST/GET /customers`,
+  `GET /customer/{id}` (360 view: links jobs/opps/threads by matching emails/phones via `_thread_key`),
+  `PUT /customer/{id}`. UI: "Customers" tab (manager-only) — list + add form + 360 modal.
+- **P2-11 material ordering:** `POST /job/{id}/material-order` builds line items from `budget.est_gallons`
+  + waste_pct + manual extras, optional dormant-safe email to supplier; `GET /job/{id}/material-orders`.
+  UI: "Material order" button per job in the customer 360 modal. (`MaterialOrderRequest`)
+- **P2-12 stage-change automation:** `advance_opp_stage` now auto-sets `next_followup_due` per
+  `_STAGE_FOLLOWUP_DAYS` on entering an active stage (drives the cadence engine + pipeline_alerts);
+  Won/Lost clear it. No new UI (surfaces in alerts + detail).
+- **P2-13 source/ROI:** `GET /sales/source-roi` (by_source leads/won/lost/win-rate/revenue); rendered
+  as a "Lead Source ROI" table in the pipeline analytics.
+- Verified (TestClient): customer 360 link by email; material order waste math (100→110, 20→22);
+  stage→Proposal auto-schedules follow-up, Won clears it; source-roi rollup; field-crew 403.
+  node --check + py_compile clean. **Note:** inbox door is fail-closed in prod (INBOX_SECRET unset →
+  `_door_secret` returns an unguessable value) — correct/secure; Fred sets INBOX_SECRET to enable.
+
+**Phase 2 = DONE.** Remaining roadmap = **Phase 3**: P3-14 1ESX measurements (needs ESX_API_KEY + account),
+P3-15 Stripe payments (needs Stripe account), P3-16 customer portal. All Phase 3 items have Fred-gated
+external dependencies — see `CRM-ROADMAP.md` §3/§6. Pure-build portion of the CRM is essentially complete.
 

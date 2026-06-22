@@ -139,6 +139,7 @@ function showTab(tabName, btn) {
   if (tabName === 'admin') loadUsers();
   if (tabName === 'pipeline') refreshPipeline();
   if (tabName === 'inbox') refreshInbox();
+  if (tabName === 'customers') refreshCustomers();
 }
 
 function showLoading(show) {
@@ -1073,15 +1074,16 @@ async function refreshPipeline() {
   const el = document.getElementById('pipeline-content');
   showLoading(true);
   try {
-    const [pipe, renewals, winLoss, alerts, perf] = await Promise.allSettled([
+    const [pipe, renewals, winLoss, alerts, perf, srcRoi] = await Promise.allSettled([
       apiCall('/pipeline'), apiCall('/renewals'), apiCall('/sales/win-loss'),
-      apiCall('/sales/alerts'), apiCall('/sales/performance'),
+      apiCall('/sales/alerts'), apiCall('/sales/performance'), apiCall('/sales/source-roi'),
     ]);
     const stages = (pipe.value || {}).pipeline || {};
     const ren = (renewals.value || {}).renewals || [];
     const wl = winLoss.value || {};
     const al = alerts.value || { sla_breaches: [], overdue_followups: [] };
     const pf = perf.value || { by_rep: {}, by_territory: {} };
+    const sr = (srcRoi.value || {}).by_source || {};
     const overdue = (al.overdue_followups || []), sla = (al.sla_breaches || []);
 
     // Summary cards
@@ -1114,8 +1116,8 @@ async function refreshPipeline() {
     }
     html += '</div>';
 
-    // Rep / Territory / Loss-reason analytics
-    html += perfTables(pf, wl);
+    // Rep / Territory / Source / Loss-reason analytics
+    html += perfTables(pf, wl, sr);
     el.innerHTML = html;
 
     const renEl = document.getElementById('renewals-content');
@@ -1148,8 +1150,8 @@ function kanbanCard(o) {
   </div>`;
 }
 
-function perfTables(pf, wl) {
-  const rep = pf.by_rep || {}, terr = pf.by_territory || {}, reasons = wl.by_loss_reason || {};
+function perfTables(pf, wl, sr) {
+  const rep = pf.by_rep || {}, terr = pf.by_territory || {}, reasons = wl.by_loss_reason || {}, src = sr || {};
   const tbl = (title, data, label) => {
     const rows = Object.entries(data);
     if (!rows.length) return '';
@@ -1158,7 +1160,8 @@ function perfTables(pf, wl) {
       ${rows.map(([k, d]) => `<tr><td>${esc(k)}</td><td>${d.leads}</td><td>${d.won}</td><td>${d.lost}</td><td>${d.open}</td><td>${d.win_rate_pct}%</td><td>$${Number(d.won_value || 0).toLocaleString()}</td></tr>`).join('')}
       </tbody></table></div>`;
   };
-  let html = tbl('Rep Performance', rep, 'Rep') + tbl('Territory Performance', terr, 'Territory');
+  let html = tbl('Rep Performance', rep, 'Rep') + tbl('Territory Performance', terr, 'Territory')
+           + tbl('Lead Source ROI', src, 'Source');
   const rEntries = Object.entries(reasons);
   if (rEntries.length) {
     html += `<div style="margin-top:1.5rem"><h3>Loss Reasons</h3>
@@ -1335,6 +1338,86 @@ async function sendInboxReply(channel, to) {
     if (_currentThread) await openInboxThread(_currentThread);
     refreshInbox();
   } catch (e) { alert('Failed to send: ' + e.message); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMERS TAB  (P2-9) + material orders (P2-11)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function showAddCustomer() { document.getElementById('add-customer-row').classList.remove('hidden'); }
+
+async function addCustomer() {
+  const name = document.getElementById('cust-name').value.trim();
+  if (!name) { alert('Name is required.'); return; }
+  const emails = document.getElementById('cust-emails').value.split(',').map(s => s.trim()).filter(Boolean);
+  const phones = document.getElementById('cust-phones').value.split(',').map(s => s.trim()).filter(Boolean);
+  const company = document.getElementById('cust-company').value.trim();
+  try {
+    await apiCall('/customers', 'POST', { name, company, emails, phones });
+    document.getElementById('add-customer-row').classList.add('hidden');
+    ['cust-name', 'cust-company', 'cust-emails', 'cust-phones'].forEach(id => document.getElementById(id).value = '');
+    refreshCustomers();
+  } catch (e) { alert('Failed to add customer: ' + e.message); }
+}
+
+async function refreshCustomers() {
+  const el = document.getElementById('customers-list');
+  try {
+    const r = await apiCall('/customers');
+    const cs = r.customers || [];
+    if (!cs.length) { el.innerHTML = '<div class="empty-state"><div class="empty-icon">&#128100;</div><p>No customers yet</p><span>Add one, or they auto-link from jobs by email/phone</span></div>'; return; }
+    el.innerHTML = cs.map(c => `
+      <div class="job-card" style="cursor:pointer" onclick="openCustomer('${c.id}')">
+        <div style="display:flex;justify-content:space-between">
+          <strong>${esc(c.name)}</strong>
+          <span class="help-text">${c.job_count} jobs &middot; ${c.opp_count} opps &middot; ${c.thread_count} threads</span>
+        </div>
+        <div class="help-text">${esc(c.company || '')} ${esc((c.emails || []).join(', '))} ${esc((c.phones || []).join(', '))}</div>
+      </div>`).join('');
+  } catch (e) { el.innerHTML = `<p class="error-message">Failed to load customers: ${e.message}</p>`; }
+}
+
+async function openCustomer(cid) {
+  let modal = document.getElementById('opp-modal');
+  if (!modal) { modal = document.createElement('div'); modal.id = 'opp-modal'; modal.className = 'modal'; document.body.appendChild(modal); }
+  modal.classList.remove('hidden');
+  modal.innerHTML = '<div class="modal-content"><p class="help-text">Loading…</p></div>';
+  try {
+    const r = await apiCall('/customer/' + encodeURIComponent(cid));
+    const c = r.customer;
+    const jobs = r.jobs || [], opps = r.opportunities || [], threads = r.threads || [];
+    modal.innerHTML = `<div class="modal-content" style="max-width:580px;max-height:82vh;overflow:auto">
+      <h3>${esc(c.name)}</h3>
+      <div class="help-text">${esc(c.company || '')}</div>
+      <div class="help-text">${esc((c.emails || []).join(', '))} ${esc((c.phones || []).join(', '))}</div>
+      <h4 style="margin:.75rem 0 .25rem">Jobs (${jobs.length})</h4>
+      ${jobs.length ? jobs.map(j => `<div style="font-size:.83rem;border-bottom:1px solid var(--border);padding:.35rem 0;display:flex;justify-content:space-between;gap:.5rem;align-items:center">
+        <span>${esc(j.client_name || j.job_id)} <span class="help-text">${esc(j.workflow_stage || '')} &middot; ${j.material_orders} order(s)</span></span>
+        <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="makeMaterialOrder('${j.job_id}')">Material order</button>
+      </div>`).join('') : '<p class="help-text">No linked jobs.</p>'}
+      <h4 style="margin:.75rem 0 .25rem">Opportunities (${opps.length})</h4>
+      ${opps.length ? opps.map(o => `<div style="font-size:.83rem;border-bottom:1px solid var(--border);padding:.3rem 0">${esc(o.client_name || o.id)} <span class="help-text">${esc(o.stage || '')}</span></div>`).join('') : '<p class="help-text">No linked opportunities.</p>'}
+      <h4 style="margin:.75rem 0 .25rem">Message threads (${threads.length})</h4>
+      ${threads.length ? threads.map(t => `<div style="font-size:.8rem" class="help-text">${esc(t)}</div>`).join('') : '<p class="help-text">No threads.</p>'}
+      <div class="modal-actions" style="margin-top:1rem"><button class="btn-secondary" onclick="closeOppDetail()">Close</button></div>
+    </div>`;
+  } catch (e) {
+    modal.innerHTML = `<div class="modal-content"><p class="error-message">Failed: ${e.message}</p><div class="modal-actions"><button class="btn-secondary" onclick="closeOppDetail()">Close</button></div></div>`;
+  }
+}
+
+async function makeMaterialOrder(jobId) {
+  const supplier = prompt('Supplier name (optional):', '');
+  if (supplier === null) return;
+  const sendTo = prompt('Email the order to (optional — leave blank to just save a draft):', '');
+  if (sendTo === null) return;
+  try {
+    const body = { supplier, waste_pct: 10 };
+    if (sendTo.trim()) body.send_to = sendTo.trim();
+    const r = await apiCall(`/job/${jobId}/material-order`, 'POST', body);
+    const lines = (r.order.line_items || []).map(li => `${li.product}: ${li.order_gallons} ${li.unit}`).join('\n');
+    alert(`Material order ${r.order.status}:\n\n${lines || '(no estimate gallons on this job)'}`);
+  } catch (e) { alert('Failed to create material order: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
