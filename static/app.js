@@ -1064,60 +1064,115 @@ function showAddPunchModal(jobId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PIPELINE_STAGES = ['New Lead', 'Site Survey', 'Measured/Cores', 'Estimating', 'Proposal', 'Negotiation', 'Won', 'Lost'];
+const LOSS_REASONS = ['price', 'tear_off', 'competitor', 'saturated', 'warranty_short', 'weather', 'timing', 'other'];
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 async function refreshPipeline() {
   const el = document.getElementById('pipeline-content');
   showLoading(true);
   try {
-    const [pipe, renewals, winLoss] = await Promise.allSettled([
-      apiCall('/pipeline'),
-      apiCall('/renewals'),
-      apiCall('/sales/win-loss'),
+    const [pipe, renewals, winLoss, alerts, perf] = await Promise.allSettled([
+      apiCall('/pipeline'), apiCall('/renewals'), apiCall('/sales/win-loss'),
+      apiCall('/sales/alerts'), apiCall('/sales/performance'),
     ]);
     const stages = (pipe.value || {}).pipeline || {};
     const ren = (renewals.value || {}).renewals || [];
     const wl = winLoss.value || {};
+    const al = alerts.value || { sla_breaches: [], overdue_followups: [] };
+    const pf = perf.value || { by_rep: {}, by_territory: {} };
+    const overdue = (al.overdue_followups || []), sla = (al.sla_breaches || []);
 
+    // Summary cards
     let html = `<div class="pipeline-summary" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem">
       <div class="summary-card"><div class="summary-label">Win Rate</div><div class="summary-value">${wl.win_rate_pct || 0}%</div><div class="summary-detail">${wl.wins || 0}W / ${wl.losses || 0}L</div></div>
-    </div>
-    <div class="kanban" style="display:flex;gap:.75rem;overflow-x:auto;padding-bottom:.5rem">`;
+      <div class="summary-card"><div class="summary-label">Follow-ups Overdue</div><div class="summary-value" style="color:${overdue.length ? '#e8920a' : 'inherit'}">${overdue.length}</div></div>
+      <div class="summary-card"><div class="summary-label">SLA Breaches</div><div class="summary-value" style="color:${sla.length ? '#e53935' : 'inherit'}">${sla.length}</div></div>
+    </div>`;
 
+    // Alerts banner
+    if (overdue.length || sla.length) {
+      const items = [...sla.map(o => ({ ...o, kind: 'SLA breach', col: '#e53935' })),
+                     ...overdue.map(o => ({ ...o, kind: 'Follow-up overdue', col: '#e8920a' }))];
+      html += `<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.6rem .8rem;margin-bottom:1rem">
+        <div style="font-weight:600;font-size:.85rem;margin-bottom:.35rem">&#9888; Needs attention (${items.length})</div>
+        ${items.slice(0, 12).map(o => `<div style="font-size:.8rem;cursor:pointer" onclick="openOppDetail('${o.id}')">
+          <span style="color:${o.col}">&bull; ${esc(o.kind)}</span> — ${esc(o.client_name || 'Unknown')} <span class="help-text">(${esc(o.stage || '')})</span></div>`).join('')}
+      </div>`;
+    }
+
+    // Kanban (drag-and-drop)
+    html += `<div class="kanban" style="display:flex;gap:.75rem;overflow-x:auto;padding-bottom:.5rem">`;
     for (const stage of PIPELINE_STAGES) {
       const opps = stages[stage] || [];
-      html += `<div class="kanban-col" style="min-width:180px;background:#1e293b;border-radius:8px;padding:.75rem">
-        <div style="font-weight:600;font-size:.85rem;margin-bottom:.5rem;color:#94a3b8">${stage} (${opps.length})</div>
-        ${opps.map(o => `
-          <div class="kanban-card" style="background:#0f172a;border-radius:6px;padding:.5rem;margin-bottom:.5rem;font-size:.82rem">
-            <div style="font-weight:600">${o.client_name || 'Unknown'}</div>
-            <div class="help-text">${o.address || ''}</div>
-            <div style="margin-top:.35rem;display:flex;gap:.25rem;flex-wrap:wrap">
-              ${PIPELINE_STAGES.filter(s => s !== stage && s !== 'Lost').map(s =>
-                `<button onclick="moveOpp('${o.id}','${s}')" style="font-size:.7rem;padding:1px 5px" class="btn-secondary">${s.split(' ')[0]}</button>`
-              ).join('')}
-            </div>
-            <div style="margin-top:.35rem">
-              ${o.job_id
-                ? `<span style="font-size:.7rem;color:var(--green-hi)" title="${o.job_id}">&#10003; Job linked</span>`
-                : `<button onclick="convertOpp('${o.id}')" style="font-size:.7rem;padding:1px 6px" class="btn-primary">&rarr; Convert to Job</button>`}
-            </div>
-          </div>`).join('')}
-        </div>`;
+      html += `<div class="kanban-col" ondragover="event.preventDefault()" ondrop="oppDrop(event,'${stage}')"
+          style="min-width:190px;background:#1e293b;border-radius:8px;padding:.75rem">
+        <div style="font-weight:600;font-size:.85rem;margin-bottom:.5rem;color:#94a3b8">${esc(stage)} (${opps.length})</div>
+        ${opps.map(o => kanbanCard(o)).join('')}
+      </div>`;
     }
     html += '</div>';
+
+    // Rep / Territory / Loss-reason analytics
+    html += perfTables(pf, wl);
     el.innerHTML = html;
 
     const renEl = document.getElementById('renewals-content');
-    if (ren.length) {
-      renEl.innerHTML = `<table class="financial-table"><thead><tr><th>Client</th><th>Address</th><th>System</th><th>Due</th><th>Days</th></tr></thead><tbody>
-        ${ren.slice(0, 10).map(r => `<tr><td>${r.client || ''}</td><td>${r.address || ''}</td><td>${r.system || ''}</td><td>${r.renewal_due || ''}</td><td style="color:${r.days_until_due < 90 ? '#ef4444' : '#22c55e'}">${r.days_until_due}</td></tr>`).join('')}
-      </tbody></table>`;
-    } else {
-      renEl.innerHTML = '<p class="help-text">No renewals due.</p>';
-    }
+    renEl.innerHTML = ren.length
+      ? `<table class="financial-table"><thead><tr><th>Client</th><th>Address</th><th>System</th><th>Due</th><th>Days</th></tr></thead><tbody>
+          ${ren.slice(0, 10).map(r => `<tr><td>${esc(r.client)}</td><td>${esc(r.address)}</td><td>${esc(r.system)}</td><td>${esc(r.renewal_due)}</td><td style="color:${r.days_until_due < 90 ? '#e53935' : '#00a855'}">${r.days_until_due}</td></tr>`).join('')}
+        </tbody></table>`
+      : '<p class="help-text">No renewals due.</p>';
   } catch (e) {
     el.innerHTML = `<p class="error-message">Failed to load pipeline: ${e.message}</p>`;
   } finally { showLoading(false); }
+}
+
+function kanbanCard(o) {
+  return `<div class="kanban-card" draggable="true" ondragstart="oppDragStart(event,'${o.id}')"
+      style="background:#0f172a;border-radius:6px;padding:.5rem;margin-bottom:.5rem;font-size:.82rem;cursor:grab">
+    <div onclick="openOppDetail('${o.id}')" style="cursor:pointer">
+      <div style="font-weight:600">${esc(o.client_name || 'Unknown')}</div>
+      <div class="help-text">${esc(o.address || '')}</div>
+      ${o.contract_value ? `<div class="help-text">$${Number(o.contract_value).toLocaleString()}</div>` : ''}
+      ${o.rep ? `<div class="help-text">Rep: ${esc(o.rep)}</div>` : ''}
+    </div>
+    <div style="margin-top:.4rem;display:flex;gap:.25rem;flex-wrap:wrap">
+      <button onclick="event.stopPropagation();markOutcome('${o.id}','won')" style="font-size:.7rem;padding:1px 6px" class="btn-primary">Won</button>
+      <button onclick="event.stopPropagation();markOutcome('${o.id}','lost')" style="font-size:.7rem;padding:1px 6px" class="btn-secondary">Lost</button>
+      ${o.job_id
+        ? `<span style="font-size:.7rem;color:var(--green-hi)" title="${esc(o.job_id)}">&#10003; Job</span>`
+        : `<button onclick="event.stopPropagation();convertOpp('${o.id}')" style="font-size:.7rem;padding:1px 6px" class="btn-secondary">&rarr; Job</button>`}
+    </div>
+  </div>`;
+}
+
+function perfTables(pf, wl) {
+  const rep = pf.by_rep || {}, terr = pf.by_territory || {}, reasons = wl.by_loss_reason || {};
+  const tbl = (title, data, label) => {
+    const rows = Object.entries(data);
+    if (!rows.length) return '';
+    return `<div style="margin-top:1.5rem"><h3>${title}</h3>
+      <table class="financial-table"><thead><tr><th>${label}</th><th>Leads</th><th>Won</th><th>Lost</th><th>Open</th><th>Win %</th><th>Won $</th></tr></thead><tbody>
+      ${rows.map(([k, d]) => `<tr><td>${esc(k)}</td><td>${d.leads}</td><td>${d.won}</td><td>${d.lost}</td><td>${d.open}</td><td>${d.win_rate_pct}%</td><td>$${Number(d.won_value || 0).toLocaleString()}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  };
+  let html = tbl('Rep Performance', rep, 'Rep') + tbl('Territory Performance', terr, 'Territory');
+  const rEntries = Object.entries(reasons);
+  if (rEntries.length) {
+    html += `<div style="margin-top:1.5rem"><h3>Loss Reasons</h3>
+      <table class="financial-table"><thead><tr><th>Reason</th><th>Count</th></tr></thead><tbody>
+      ${rEntries.sort((a, b) => b[1] - a[1]).map(([k, n]) => `<tr><td>${esc(k)}</td><td>${n}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  }
+  return html;
+}
+
+// Drag-and-drop (P1-7)
+function oppDragStart(ev, oppId) { ev.dataTransfer.setData('text/plain', oppId); ev.dataTransfer.effectAllowed = 'move'; }
+async function oppDrop(ev, stage) {
+  ev.preventDefault();
+  const oppId = ev.dataTransfer.getData('text/plain');
+  if (oppId) await moveOpp(oppId, stage);
 }
 
 async function moveOpp(oppId, stage) {
@@ -1134,6 +1189,77 @@ async function convertOpp(oppId) {
     alert(r.message || 'Converted to job');
     refreshPipeline();
   } catch (e) { alert('Failed to convert: ' + e.message); }
+}
+
+// Win/Loss (P1-2)
+async function markOutcome(oppId, outcome) {
+  let body = { outcome };
+  if (outcome === 'lost') {
+    const reason = prompt('Loss reason (' + LOSS_REASONS.join(' / ') + '):', 'price');
+    if (reason === null) return;
+    body.loss_reason = reason;
+  } else if (!confirm('Mark this opportunity WON? (If it has a linked job, it will be handed to production.)')) {
+    return;
+  }
+  try {
+    await apiCall(`/pipeline/${oppId}/win-loss`, 'POST', body);
+    refreshPipeline();
+  } catch (e) { alert('Failed to record outcome: ' + e.message); }
+}
+
+// Opportunity detail modal (P1-8): timeline + cadence + comm-log + log-follow-up
+async function openOppDetail(oppId) {
+  let modal = document.getElementById('opp-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'opp-modal';
+    modal.className = 'modal';
+    document.body.appendChild(modal);
+  }
+  modal.classList.remove('hidden');
+  modal.innerHTML = `<div class="modal-content"><p class="help-text">Loading…</p></div>`;
+  try {
+    const tl = await apiCall(`/pipeline/${oppId}/timeline`);
+    const timeline = (tl.timeline || []).slice().reverse();
+    const cadence = (tl.cadence_log || []).slice().reverse();
+    let html = `<div class="modal-content" style="max-width:560px;max-height:80vh;overflow:auto">
+      <h3>Opportunity Detail</h3>
+      <div style="margin:.5rem 0">
+        <h4 style="margin:.5rem 0 .25rem">Log a follow-up</h4>
+        <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+          <select id="cad-type"><option value="call">Call</option><option value="email">Email</option><option value="sms">SMS</option><option value="visit">Visit</option><option value="note">Note</option></select>
+          <input id="cad-summary" placeholder="What happened / next step" style="flex:1;min-width:160px">
+          <label class="help-text">Next due <input id="cad-due" type="date"></label>
+          <button class="btn-primary" onclick="logFollowup('${oppId}')">Save</button>
+        </div>
+      </div>
+      <h4 style="margin:.75rem 0 .25rem">Cadence (${cadence.length})</h4>
+      ${cadence.length ? cadence.map(c => `<div style="font-size:.82rem;border-bottom:1px solid var(--border);padding:.3rem 0">
+        <strong>${esc(c.contact_type)}</strong> — ${esc(c.summary)} <span class="help-text">(${esc((c.at||'').slice(0,16))}${c.due_at ? ', next ' + esc(c.due_at.slice(0,10)) : ''})</span></div>`).join('') : '<p class="help-text">No cadence steps yet.</p>'}
+      <h4 style="margin:.75rem 0 .25rem">Timeline (${timeline.length})</h4>
+      ${timeline.length ? timeline.map(t => `<div style="font-size:.8rem;border-bottom:1px solid var(--border);padding:.25rem 0">
+        <span style="color:var(--green-hi)">${esc(t.event)}</span> <span class="help-text">${esc((t.at||'').slice(0,16))}</span>
+        ${t.to ? ' &rarr; ' + esc(t.to) : ''}${t.summary ? ' — ' + esc(t.summary) : ''}${t.job_id ? ' (' + esc(t.job_id) + ')' : ''}</div>`).join('') : '<p class="help-text">No timeline yet.</p>'}
+      <div class="modal-actions" style="margin-top:1rem"><button class="btn-secondary" onclick="closeOppDetail()">Close</button></div>
+    </div>`;
+    modal.innerHTML = html;
+  } catch (e) {
+    modal.innerHTML = `<div class="modal-content"><p class="error-message">Failed to load: ${e.message}</p><div class="modal-actions"><button class="btn-secondary" onclick="closeOppDetail()">Close</button></div></div>`;
+  }
+}
+function closeOppDetail() { const m = document.getElementById('opp-modal'); if (m) m.classList.add('hidden'); }
+async function logFollowup(oppId) {
+  const contact_type = document.getElementById('cad-type').value;
+  const summary = document.getElementById('cad-summary').value.trim();
+  if (!summary) { alert('Add a short summary.'); return; }
+  const dueVal = document.getElementById('cad-due').value;
+  const body = { contact_type, summary };
+  if (dueVal) body.due_at = new Date(dueVal).toISOString();
+  try {
+    await apiCall(`/pipeline/${oppId}/cadence`, 'POST', body);
+    closeOppDetail();
+    refreshPipeline();
+  } catch (e) { alert('Failed to log follow-up: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

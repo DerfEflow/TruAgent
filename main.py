@@ -572,6 +572,7 @@ class LeadWebhook(BaseModel):
     email: Optional[str] = None
     notes: Optional[str] = None
     rep: Optional[str] = None
+    territory: Optional[str] = None
     data: Optional[dict] = None
 
 class ChangeOrderRequest(BaseModel):
@@ -739,6 +740,13 @@ class ContactLogRequest(BaseModel):
     summary: str
     contact_with: Optional[str] = None
     direction: Optional[str] = "outbound"
+    due_at: Optional[str] = None        # P1-3: when the NEXT follow-up is due (ISO). Default +3 days.
+
+class ReferralRequest(BaseModel):
+    referrer_name: Optional[str] = None     # the happy customer making the referral
+    referred_name: str                       # the new prospect
+    referred_contact: Optional[str] = None   # phone/email of the prospect
+    notes: Optional[str] = None
 
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
@@ -2889,6 +2897,7 @@ async def leads_webhook(payload: LeadWebhook):
         "email": payload.email,
         "notes": payload.notes,
         "rep": payload.rep,
+        "territory": payload.territory,
         "source": payload.source or "unknown",
         "stage": "New Lead",
         "first_touch_at": datetime.now().isoformat(),
@@ -3820,17 +3829,21 @@ async def delete_opportunity(opportunity_id: str,
 @app.post("/pipeline/{opportunity_id}/cadence")
 async def set_cadence(opportunity_id: str, req: ContactLogRequest,
                       current_user: dict = Depends(get_current_user)):
-    """S31: Log a cadence step / follow-up action."""
+    """S31 (P1-3): Log a cadence step and set when the NEXT follow-up is due.
+    `next_followup_due` is what the pipeline-alerts scan watches for overdue
+    follow-ups, so this is a real cadence engine, not just a log."""
     db = load_db()
     opp = db.get("opportunities", {}).get(opportunity_id)
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
+    due_at = req.due_at or (datetime.now() + timedelta(days=3)).isoformat()
     step = {"contact_type": req.contact_type, "summary": req.summary,
-            "by": current_user["email"], "at": datetime.now().isoformat()}
+            "due_at": due_at, "by": current_user["email"], "at": datetime.now().isoformat()}
     opp.setdefault("cadence_log", []).append(step)
+    opp["next_followup_due"] = due_at
     opp.setdefault("timeline", []).append({"event": "cadence_step", **step})
     save_db(db)
-    return {"status": "ok", "cadence_step": step}
+    return {"status": "ok", "cadence_step": step, "next_followup_due": due_at}
 
 @app.post("/pipeline/{opportunity_id}/win-loss")
 async def log_win_loss(opportunity_id: str, req: WinLossRequest,
@@ -4029,13 +4042,14 @@ async def renewals_list(current_user: dict = Depends(get_manager_or_above)):
 
 @app.get("/sales/performance")
 async def rep_performance(current_user: dict = Depends(get_manager_or_above)):
-    """S36: Territory & rep performance dashboard."""
+    """S36 (P1-6): Territory & rep performance dashboard."""
     db = load_db()
     by_rep: Dict[str, dict] = {}
-    for opp in db.get("opportunities", {}).values():
-        rep = opp.get("rep") or "unassigned"
-        d = by_rep.setdefault(rep, {"leads": 0, "won": 0, "lost": 0, "open": 0,
-                                     "total_value": 0, "won_value": 0})
+    by_territory: Dict[str, dict] = {}
+
+    def _tally(bucket: dict, key: str, opp: dict):
+        d = bucket.setdefault(key, {"leads": 0, "won": 0, "lost": 0, "open": 0,
+                                    "total_value": 0, "won_value": 0})
         d["leads"] += 1
         outcome = opp.get("outcome")
         if outcome == "won":
@@ -4046,10 +4060,41 @@ async def rep_performance(current_user: dict = Depends(get_manager_or_above)):
             d["lost"] += 1
         else:
             d["open"] += 1
-    for rep, d in by_rep.items():
-        total_closed = d["won"] + d["lost"]
-        d["win_rate_pct"] = round(d["won"] / total_closed * 100, 1) if total_closed else 0
-    return {"status": "ok", "by_rep": by_rep}
+
+    for opp in db.get("opportunities", {}).values():
+        _tally(by_rep, opp.get("rep") or "unassigned", opp)
+        _tally(by_territory, opp.get("territory") or "unassigned", opp)
+    for bucket in (by_rep, by_territory):
+        for d in bucket.values():
+            total_closed = d["won"] + d["lost"]
+            d["win_rate_pct"] = round(d["won"] / total_closed * 100, 1) if total_closed else 0
+    return {"status": "ok", "by_rep": by_rep, "by_territory": by_territory}
+
+
+@app.get("/sales/alerts")
+async def sales_alerts(current_user: dict = Depends(get_manager_or_above)):
+    """P1-3/P1-5: read the latest pipeline-alerts snapshot (overdue follow-ups +
+    SLA breaches) that the pipeline_alerts cron task computes."""
+    db = load_db()
+    return {"status": "ok", **db.get("pipeline_alerts",
+            {"sla_breaches": [], "overdue_followups": [], "scanned_at": None})}
+
+
+@app.post("/job/{job_id}/referral")
+async def add_referral(job_id: str, req: ReferralRequest,
+                       current_user: dict = Depends(get_manager_or_above)):
+    """S34 (P1-4): capture a referral from a customer/job."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    referral = {"referrer_name": req.referrer_name or job.get("client_name"),
+                "referred_name": req.referred_name, "referred_contact": req.referred_contact,
+                "notes": req.notes, "captured_by": current_user["email"],
+                "captured_at": datetime.now().isoformat()}
+    job.setdefault("referrals", []).append(referral)
+    save_db(db)
+    return {"status": "ok", "referral": referral}
 
 @app.get("/pipeline/{opportunity_id}/timeline")
 async def opp_timeline(opportunity_id: str, current_user: dict = Depends(get_current_user)):
@@ -4778,6 +4823,72 @@ def _cron_suite_sync_heartbeat():
     return f"suite sync heartbeat recorded at {now}"
 
 
+def _cron_pipeline_alerts():
+    """P1-3/P1-5: surface overdue follow-ups (cadence next_followup_due in the past)
+    and lead-SLA breaches (past sla_due, still 'New Lead', never contacted) into
+    db['pipeline_alerts'] so the pipeline view can flag them. db-only; no external send."""
+    db = load_db()
+    now = datetime.now()
+    sla_breaches, overdue_followups = [], []
+    for oid, opp in db.get("opportunities", {}).items():
+        if opp.get("outcome") in ("won", "lost"):
+            continue
+        card = {"id": oid, "client_name": opp.get("client_name"),
+                "address": opp.get("address"), "rep": opp.get("rep"), "stage": opp.get("stage")}
+        sla_due = opp.get("sla_due")
+        if sla_due and opp.get("stage") == "New Lead" and not opp.get("cadence_log"):
+            try:
+                if datetime.fromisoformat(sla_due) < now:
+                    sla_breaches.append({**card, "sla_due": sla_due})
+            except (ValueError, TypeError):
+                pass
+        nfd = opp.get("next_followup_due")
+        if nfd:
+            try:
+                if datetime.fromisoformat(nfd) < now:
+                    overdue_followups.append({**card, "next_followup_due": nfd})
+            except (ValueError, TypeError):
+                pass
+    db["pipeline_alerts"] = {"sla_breaches": sla_breaches,
+                             "overdue_followups": overdue_followups,
+                             "scanned_at": now.isoformat()}
+    save_db(db)
+    return {"sla_breaches": len(sla_breaches), "overdue_followups": len(overdue_followups)}
+
+
+def _cron_review_flush():
+    """P1-4: drain queued post-cure review-asks whose send_after has passed, routing
+    them through the email outbox (which itself stays dormant-safe until EMAIL_WEBHOOK_URL
+    is set). Marks each request sent/queued_no_contact so it is never re-sent."""
+    db = load_db()
+    now = datetime.now()
+    flushed = no_contact = 0
+    for jid, job in db.get("jobs", {}).items():
+        for r in job.get("review_requests", []):
+            if r.get("status") != "queued":
+                continue
+            try:
+                due = datetime.fromisoformat(r.get("send_after"))
+            except (ValueError, TypeError):
+                due = now
+            if due > now:
+                continue
+            to = job.get("customer_email")
+            if to:
+                _email_dispatch(db, {
+                    "to": to, "subject": "How did we do? — Truline Roofing",
+                    "body": r.get("message") or "Thanks for choosing Truline Roofing! "
+                            "If you have a moment, we'd appreciate a quick review.",
+                    "sent_by": "review-flush", "sent_at": now.isoformat()})
+                r["status"] = "sent"
+                flushed += 1
+            else:
+                r["status"] = "queued_no_contact"
+                no_contact += 1
+    save_db(db)
+    return {"flushed": flushed, "no_contact": no_contact}
+
+
 _CRON_TASKS["compliance_scan"] = _cron_compliance_scan   # O52 rollup
 _CRON_TASKS["coi_scan"] = _cron_compliance_scan          # O46
 _CRON_TASKS["cert_scan"] = _cron_compliance_scan         # O51
@@ -4785,6 +4896,8 @@ _CRON_TASKS["anomaly_scan"] = _cron_anomaly_scan         # I62
 _CRON_TASKS["flush_outbox"] = _flush_outbox_once         # outbox email retry
 _CRON_TASKS["flush_sms"] = _flush_sms_once               # sms outbox retry (7c)
 _CRON_TASKS["suite_sync_heartbeat"] = _cron_suite_sync_heartbeat  # in-hub heartbeat (8a)
+_CRON_TASKS["pipeline_alerts"] = _cron_pipeline_alerts   # P1-3/P1-5 follow-up + SLA alerts
+_CRON_TASKS["review_flush"] = _cron_review_flush          # P1-4 drain review-ask queue
 
 
 # ─── In-process scheduler (built-in scheduled scans) ─────────────────────────
@@ -4802,6 +4915,8 @@ _SCHEDULE = [
     ("compliance_scan", 24 * 3600),   # COI/cert/SDS expiry rollup -> compliance_alerts
     ("anomaly_scan", 24 * 3600),      # margin/gallon anomaly flags -> anomaly_snapshot
     ("suite_sync_heartbeat", 3600),   # hub liveness marker -> sync_heartbeat
+    ("pipeline_alerts", 6 * 3600),    # P1-3/P1-5 overdue follow-ups + SLA breaches
+    ("review_flush", 24 * 3600),      # P1-4 drain post-cure review-ask queue (dormant-safe)
 ]
 _SCHEDULER_TICK_SECS = 300  # re-check for due jobs every 5 minutes
 

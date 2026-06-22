@@ -76,16 +76,16 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
   `opp.job_id` ↔ `job.origin_opportunity_id`. Idempotent. UI: "Convert to Job" on pipeline cards.
   *Acceptance met:* converting an opp creates/links a job; `opp.job_id` is set; the Won-stage sync &
   e-sign auto-Won now fire. Verified via TestClient (create→convert→idempotent→Won-handoff→403 for field crew).
-- [ ] **P1-2. Win/Loss UI + analytics surfacing.** Mark won/lost on a card (`POST /pipeline/{id}/win-loss`);
+- [x] **P1-2. Win/Loss UI + analytics surfacing.** Mark won/lost on a card (`POST /pipeline/{id}/win-loss`);
   render the `by_loss_reason` + `by_rep` rollups from `/sales/win-loss` (already computed, currently discarded).
-- [ ] **P1-3. Cadence → real engine.** Add `due_at` to cadence steps + a cron task that flags overdue
+- [x] **P1-3. Cadence → real engine.** Add `due_at` to cadence steps + a cron task that flags overdue
   follow-ups; "Follow-ups due" view. (`/pipeline/{id}/cadence` exists; no timer/UI today.)
-- [ ] **P1-4. Drain review-request queue + referral capture.** Cron flush queued review-asks via
+- [x] **P1-4. Drain review-request queue + referral capture.** Cron flush queued review-asks via
   email/SMS outbox; add referral capture field/endpoint. (`/job/{id}/review-request` queues, nothing sends.)
-- [ ] **P1-5. Lead SLA enforcement.** Cron rule flags opps past `sla_due` with no first touch; surface on dashboard.
-- [ ] **P1-6. Rep/territory performance UI + territory field.** Surface orphaned `/sales/performance`; add a territory dimension.
-- [ ] **P1-7. Real kanban.** Drag-and-drop stage changes; card shows value/age/next-action; reconcile stage list.
-- [ ] **P1-8. Opportunity/Job detail view.** Read the existing `timeline` + `comm-log` (both stored, neither shown).
+- [x] **P1-5. Lead SLA enforcement.** Cron rule flags opps past `sla_due` with no first touch; surface on dashboard.
+- [x] **P1-6. Rep/territory performance UI + territory field.** Surface orphaned `/sales/performance`; add a territory dimension.
+- [x] **P1-7. Real kanban.** Drag-and-drop stage changes; card shows value/age/next-action; reconcile stage list.
+- [x] **P1-8. Opportunity/Job detail view.** Read the existing `timeline` + `comm-log` (both stored, neither shown).
 
 ## 5. Phase 2 — Build the genuine gaps (net-new)
 - [ ] **P2-9. Customer/contact entity.** First-class `customers` with many contacts, linked to jobs/opps
