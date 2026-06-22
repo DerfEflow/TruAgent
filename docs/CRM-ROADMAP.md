@@ -71,11 +71,11 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 ## 4. Phase 1 — Make the CRM you already have actually work
 *Mostly wiring existing backend to UI + adding a few cron timers. High ROI, low risk.*
 
-- [ ] **P1-1. Opportunity ↔ Job link + convert-to-job** *(IN PROGRESS — see build log)*
+- [x] **P1-1. Opportunity ↔ Job link + convert-to-job** *(DONE 2026-06-22, commit 50bc569)*
   Backend `POST /pipeline/{id}/convert` (manager+): create/link a job from an opp, set
   `opp.job_id` ↔ `job.origin_opportunity_id`. Idempotent. UI: "Convert to Job" on pipeline cards.
-  *Acceptance:* converting an opp creates/links a job; `opp.job_id` is set; the Won-stage sync &
-  e-sign auto-Won (which depend on `opp.job_id`) now fire.
+  *Acceptance met:* converting an opp creates/links a job; `opp.job_id` is set; the Won-stage sync &
+  e-sign auto-Won now fire. Verified via TestClient (create→convert→idempotent→Won-handoff→403 for field crew).
 - [ ] **P1-2. Win/Loss UI + analytics surfacing.** Mark won/lost on a card (`POST /pipeline/{id}/win-loss`);
   render the `by_loss_reason` + `by_rep` rollups from `/sales/win-loss` (already computed, currently discarded).
 - [ ] **P1-3. Cadence → real engine.** Add `due_at` to cadence steps + a cron task that flags overdue
