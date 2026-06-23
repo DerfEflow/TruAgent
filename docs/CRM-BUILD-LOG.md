@@ -99,6 +99,25 @@ webhooks (cadence/review actually emailing), QuickBooks Zaps. See `CRM-ROADMAP.m
   `_door_secret` returns an unguessable value) — correct/secure; Fred sets INBOX_SECRET to enable.
 
 **Phase 2 = DONE.** Remaining roadmap = **Phase 3**: P3-14 1ESX measurements (needs ESX_API_KEY + account),
-P3-15 Stripe payments (needs Stripe account), P3-16 customer portal. All Phase 3 items have Fred-gated
-external dependencies — see `CRM-ROADMAP.md` §3/§6. Pure-build portion of the CRM is essentially complete.
+P3-15 Stripe payments, P3-16 customer portal.
+
+---
+
+## 2026-06-22 (cont.) — P3-15 Stripe payments DONE
+
+- Truline Stripe account confirmed: wallet `TRUAGENT_STRIPE_KEY` = `sk_live` for **"Trulineroofing"**
+  (NOT the Delta Log `STRIPE_SECRET_KEY` — that one is Delta's; do not use it for Truline).
+- Backend: `STRIPE_API_KEY` + `STRIPE_WEBHOOK_SECRET` env; `POST /job/{id}/payment-link` (Checkout
+  Session, ad-hoc amount, metadata.job_id), `GET /job/{id}/payments`, `POST /stripe/webhook`
+  (HMAC-SHA256 verified) → marks job payment paid + records a `source:stripe` paid invoice in financials.
+  `static/thanks.html` is the customer success page. `_stripe_post` helper (form-encoded, basic-auth key).
+- Frontend: "Request payment" button per job in the customer 360 modal (`requestPayment`).
+- Verified LIVE against the Truline account (TestClient): created a real `cs_live` Checkout link (no charge),
+  expired the test session to clean up; signed webhook marks paid + adds invoice; bad sig 403; field-crew 403.
+- Wiring: set `STRIPE_API_KEY` (from `TRUAGENT_STRIPE_KEY`) on Railway; registered a Stripe webhook
+  endpoint → set `STRIPE_WEBHOOK_SECRET`. Customer pays on Stripe's hosted page via the emailed link —
+  TruAgent stays internal.
+
+**Remaining Phase 3:** P3-14 1ESX (needs ESX account/API key), P3-16 customer portal (decide if wanted),
+proposals-polish doc. **2a still pending Fred:** approve Gmail+Twilio OAuth links so email/SMS send live.
 

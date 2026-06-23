@@ -102,7 +102,11 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 
 ## 6. Phase 3 — The bigger build
 - [ ] **P3-14. 1ESX measurements integration** (order → parse XML area/parapet/penetrations → pre-fill Alpha). Brief §4.
-- [ ] **P3-15. Proposals polish + Stripe payments.**
+- [x] **P3-15 (Stripe payments) DONE 2026-06-22.** `POST /job/{id}/payment-link` (manager+) →
+  Stripe Checkout link (Truline account, `STRIPE_API_KEY`); `POST /stripe/webhook` (HMAC-verified,
+  `STRIPE_WEBHOOK_SECRET`) marks the job paid + records a financials invoice; "Request payment" button
+  in the customer 360. Verified live (link created + expired, signed webhook marks paid). *Proposals
+  polish (templated proposal doc) still TODO under this item.*
 - [ ] **P3-16. Customer portal** (view / sign / pay / track).
 
 ## 7. Cross-cutting (do alongside)

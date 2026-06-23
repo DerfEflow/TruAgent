@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 import asyncio
 import os
 import hashlib
+import hmac
 import json
 import secrets
 import threading
@@ -90,6 +91,13 @@ ESIGN_SECRET = _door_secret("ESIGN_SECRET", "change_esign_secret_in_production")
 # Shared secret for the inbound comms door (P2-10): a Zapier email-parser / Gmail
 # trigger and a Twilio inbound-SMS webhook POST incoming customer messages here.
 INBOX_SECRET = _door_secret("INBOX_SECRET", "change_inbox_secret_in_production")
+
+# P3-15 Stripe payments — how Truline gets paid by customers. The Stripe secret key
+# is for the Truline Roofing account; payment happens on Stripe's hosted page (a link
+# TruAgent emails), so TruAgent itself stays internal. Dormant until STRIPE_API_KEY set.
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+STRIPE_ENABLED = bool(STRIPE_API_KEY)
 
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is a current, known-good id; a fallback (OPENAI_FALLBACK_MODEL) is used
@@ -781,6 +789,10 @@ class MaterialOrderRequest(BaseModel):
     waste_pct: Optional[float] = 10.0          # added to estimated gallons
     extra_items: List[dict] = []               # [{product, quantity, unit}]
     send_to: Optional[str] = None              # supplier email (dormant-safe send)
+
+class PaymentLinkRequest(BaseModel):
+    amount: float                              # dollars (USD)
+    description: Optional[str] = None
 
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
@@ -4443,6 +4455,102 @@ async def source_roi(current_user: dict = Depends(get_manager_or_above)):
         tc = d["won"] + d["lost"]
         d["win_rate_pct"] = round(d["won"] / tc * 100, 1) if tc else 0
     return {"status": "ok", "by_source": by_source}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P3-15 — Stripe payments (customer pays on Stripe's hosted page via an emailed link)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _stripe_post(path: str, data: dict) -> dict:
+    import requests
+    r = requests.post(f"https://api.stripe.com{path}", data=data, auth=(STRIPE_API_KEY, ""), timeout=20)
+    body = r.json()
+    if not r.ok:
+        raise HTTPException(status_code=502,
+                            detail=f"Stripe error: {body.get('error', {}).get('message', 'unknown')}")
+    return body
+
+
+@app.post("/job/{job_id}/payment-link")
+async def create_payment_link(job_id: str, req: PaymentLinkRequest,
+                              current_user: dict = Depends(get_manager_or_above)):
+    """P3-15: create a Stripe Checkout payment link for a job amount. No money moves
+    until the customer pays on Stripe's hosted page. Returns the shareable URL."""
+    if not STRIPE_ENABLED:
+        return {"status": "not_configured",
+                "message": "Set STRIPE_API_KEY (the Truline Stripe secret key) to enable payments."}
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    amount_cents = int(round(float(req.amount) * 100))
+    if amount_cents < 50:
+        raise HTTPException(status_code=400, detail="Amount must be at least $0.50")
+    base = (os.getenv("RAILWAY_STATIC_URL") or "truagent-production.up.railway.app").replace("https://", "").rstrip("/")
+    name = req.description or f"Truline Roofing — {job.get('client_name') or job_id}"
+    data = {
+        "mode": "payment",
+        "success_url": f"https://{base}/static/thanks.html",
+        "cancel_url": f"https://{base}/static/thanks.html?canceled=1",
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": "usd",
+        "line_items[0][price_data][unit_amount]": amount_cents,
+        "line_items[0][price_data][product_data][name]": name,
+        "metadata[job_id]": job_id,
+        "metadata[created_by]": current_user["email"],
+    }
+    session = _stripe_post("/v1/checkout/sessions", data)
+    payment = {"session_id": session.get("id"), "url": session.get("url"),
+               "amount": req.amount, "description": name, "status": "pending",
+               "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
+    job.setdefault("payments", []).append(payment)
+    save_db(db)
+    return {"status": "ok", "payment": payment, "url": payment["url"]}
+
+
+@app.get("/job/{job_id}/payments")
+async def list_payments(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "ok", "payments": job.get("payments", [])}
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """P3-15 inbound: Stripe notifies us when a customer pays. Verifies the signature,
+    then marks the job's payment paid and records it in financials."""
+    raw = await request.body()
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Stripe webhook not configured")
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        parts = dict(p.split("=", 1) for p in sig.split(",") if "=" in p)
+        signed = f"{parts['t']}.{raw.decode()}"
+        expected = hmac.new(STRIPE_WEBHOOK_SECRET.encode(), signed.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, parts.get("v1", "")):
+            raise ValueError("bad signature")
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid Stripe signature")
+    event = json.loads(raw.decode())
+    if event.get("type") == "checkout.session.completed":
+        session = event["data"]["object"]
+        job_id = (session.get("metadata") or {}).get("job_id")
+        amount = (session.get("amount_total") or 0) / 100.0
+        db = load_db()
+        job = db.get("jobs", {}).get(job_id) if job_id else None
+        if job:
+            for p in job.get("payments", []):
+                if p.get("session_id") == session.get("id"):
+                    p["status"] = "paid"
+                    p["paid_at"] = datetime.now().isoformat()
+            txid = f"stripe_{session.get('id')}"
+            db.setdefault("financials", {}).setdefault("invoices", {})[txid] = {
+                "amount": amount, "job_id": job_id, "status": "paid",
+                "source": "stripe", "paid_at": datetime.now().isoformat()}
+            save_db(db)
+    return {"status": "ok", "event": event.get("type")}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1393,7 +1393,10 @@ async function openCustomer(cid) {
       <h4 style="margin:.75rem 0 .25rem">Jobs (${jobs.length})</h4>
       ${jobs.length ? jobs.map(j => `<div style="font-size:.83rem;border-bottom:1px solid var(--border);padding:.35rem 0;display:flex;justify-content:space-between;gap:.5rem;align-items:center">
         <span>${esc(j.client_name || j.job_id)} <span class="help-text">${esc(j.workflow_stage || '')} &middot; ${j.material_orders} order(s)</span></span>
-        <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="makeMaterialOrder('${j.job_id}')">Material order</button>
+        <span style="display:flex;gap:.25rem">
+          <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="makeMaterialOrder('${j.job_id}')">Material order</button>
+          <button class="btn-primary" style="font-size:.7rem;padding:1px 6px" onclick="requestPayment('${j.job_id}')">Request payment</button>
+        </span>
       </div>`).join('') : '<p class="help-text">No linked jobs.</p>'}
       <h4 style="margin:.75rem 0 .25rem">Opportunities (${opps.length})</h4>
       ${opps.length ? opps.map(o => `<div style="font-size:.83rem;border-bottom:1px solid var(--border);padding:.3rem 0">${esc(o.client_name || o.id)} <span class="help-text">${esc(o.stage || '')}</span></div>`).join('') : '<p class="help-text">No linked opportunities.</p>'}
@@ -1404,6 +1407,18 @@ async function openCustomer(cid) {
   } catch (e) {
     modal.innerHTML = `<div class="modal-content"><p class="error-message">Failed: ${e.message}</p><div class="modal-actions"><button class="btn-secondary" onclick="closeOppDetail()">Close</button></div></div>`;
   }
+}
+
+async function requestPayment(jobId) {
+  const amt = prompt('Payment amount in USD (e.g. 4500):', '');
+  if (amt === null) return;
+  const amount = parseFloat(amt);
+  if (!(amount > 0)) { alert('Enter a valid amount.'); return; }
+  try {
+    const r = await apiCall(`/job/${jobId}/payment-link`, 'POST', { amount });
+    if (r.status === 'not_configured') { alert(r.message); return; }
+    prompt('Payment link created — copy it and send to the customer:', r.url);
+  } catch (e) { alert('Failed to create payment link: ' + e.message); }
 }
 
 async function makeMaterialOrder(jobId) {

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Truline Roofing — Thank You</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+</head>
+<body>
+  <div class="screen" style="display:flex;align-items:center;justify-content:center;min-height:100vh">
+    <div class="login-container" style="text-align:center">
+      <img src="/static/logo.png" alt="Truline Roofing" class="logo">
+      <h1 style="margin-top:1rem">TRULINE ROOFING</h1>
+      <h2 id="msg">Thank you — your payment was received.</h2>
+      <p class="help-text" id="sub">A receipt has been emailed to you. You can close this page.</p>
+    </div>
+  </div>
+  <script>
+    if (new URLSearchParams(location.search).has('canceled')) {
+      document.getElementById('msg').textContent = 'Payment canceled.';
+      document.getElementById('sub').textContent = 'No charge was made. You can close this page or use your payment link again.';
+    }
+  </script>
+</body>
+</html>
