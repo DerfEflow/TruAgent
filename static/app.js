@@ -1396,6 +1396,7 @@ async function openCustomer(cid) {
         <span>${esc(j.client_name || j.job_id)} <span class="help-text">${esc(j.workflow_stage || '')} &middot; ${j.material_orders} order(s)</span></span>
         <span style="display:flex;gap:.25rem">
           <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="makeMaterialOrder('${j.job_id}')">Material order</button>
+          <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="customerPortalLink('${j.job_id}')">Portal link</button>
           <button class="btn-primary" style="font-size:.7rem;padding:1px 6px" onclick="requestPayment('${j.job_id}')">Request payment</button>
         </span>
       </div>`).join('') : '<p class="help-text">No linked jobs.</p>'}
@@ -1420,6 +1421,18 @@ async function requestPayment(jobId) {
     if (r.status === 'not_configured') { alert(r.message); return; }
     prompt('Payment link created — copy it and send to the customer:', r.url);
   } catch (e) { alert('Failed to create payment link: ' + e.message); }
+}
+
+async function customerPortalLink(jobId) {
+  const sendTo = prompt('Customer portal — email the link to (leave blank to just get the link):', '');
+  if (sendTo === null) return;
+  try {
+    const body = {};
+    if (sendTo.trim()) body.send_to = sendTo.trim();
+    const r = await apiCall(`/job/${jobId}/portal-link`, 'POST', body);
+    const sent = r.emailed ? `\n\nEmail: ${r.emailed}${r.sent_to ? ' → ' + r.sent_to : ''}` : '';
+    prompt('Customer portal link (view / sign / pay / track) — copy & send to the customer:' + sent, r.url);
+  } catch (e) { alert('Failed to create portal link: ' + e.message); }
 }
 
 async function makeMaterialOrder(jobId) {

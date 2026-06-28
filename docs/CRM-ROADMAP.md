@@ -121,7 +121,15 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
   `STRIPE_WEBHOOK_SECRET`) marks the job paid + records a financials invoice; "Request payment" button
   in the customer 360. Verified live (link created + expired, signed webhook marks paid). *Proposals
   polish (templated proposal doc) still TODO under this item.*
-- [ ] **P3-16. Customer portal** (view / sign / pay / track).
+- [x] **P3-16. Customer portal** (view / sign / pay / track) *(DONE 2026-06-28).* Tokenized,
+  login-less page (`static/portal.html`) reached at `/portal?token=…` — customers never log into
+  TruAgent. Per-job capability token (`POST /job/{id}/portal-link`, manager+, dormant-safe email of
+  the link). Public token-gated API: `GET /portal/data` (sanitized — quoted price + scope + status
+  only, NO costs/margins/expenses/internal notes), `POST /portal/sign` (typed-name e-sign → reuses
+  esign_records; fires the Won handoff when the job came from an opportunity), `POST /portal/pay`
+  (reuses the P3-15 Stripe hosted-page flow for the outstanding balance; dormant-safe). "Portal link"
+  button in the customer-360. Verified: 30 TestClient checks (token lifecycle/regenerate, sanitization,
+  sign→Won, dormant Stripe+email, bad-token 404s, field-crew 403).
 
 ## 7. Cross-cutting (do alongside)
 - [ ] Reconcile pipeline **stage vocabulary** across lead door, `/pipeline`, and UI (currently mismatched).

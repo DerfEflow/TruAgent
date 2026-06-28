@@ -172,3 +172,40 @@ paid 1ESX (only if survey-grade wanted alongside DIY). **Future polish:** in-app
 editor (today manual correction is a GeoJSON textarea + external OSM/Maps verify links); county-GIS
 connector.
 
+---
+
+## 2026-06-28 (cont.) — P3-16 customer portal DONE (branch `crm-phase3`)
+
+Tokenized, login-less customer page. **Customers never log into TruAgent** — a per-job capability
+token reaches one public page (`static/portal.html`) where they view the proposal, approve/e-sign,
+pay, and track status. The token IS the auth.
+
+**Backend (main.py):** `db["portal_tokens"]` store (token→job_id). Models `PortalLinkRequest`/
+`PortalSignRequest`. `_make_job_checkout` helper factored out of `create_payment_link` so the staff
+endpoint AND the portal share one Stripe hosted-page path (P3-15 path preserved by reuse + the
+not_configured branch). Endpoints:
+- `POST /job/{id}/portal-link` (**manager+**) — mint/reuse/`regenerate` a token; dormant-safe email
+  of the link via `_send_email_or_log` (queues until EMAIL_WEBHOOK_URL is set).
+- `GET /portal` (public) — serves the page. `GET /portal/data?token=` (public) — **sanitized** view
+  via `_portal_view`: quoted contract value + scope (system/substrate/sqft/warranty) + a friendly
+  status ladder + payment balance + signature state. NO costs/margins/expenses/internal notes.
+- `POST /portal/sign` (public) — typed full name = e-signature; appends an `esign_records` entry and,
+  when the job has `origin_opportunity_id`, runs the existing `_apply_won_handoff` (same as the e-sign
+  webhook). Plain jobs flip to `workflow_stage=Approved`.
+- `POST /portal/pay?token=` (public) — Stripe Checkout for the outstanding balance (contract −
+  paid); dormant-safe (`not_configured` / `nothing_due`).
+
+**Frontend:** `static/portal.html` (Truline-branded, mobile-first: proposal card, status ladder,
+sign form, pay button → Stripe). "Portal link" button added to the customer-360 jobs row
+(`customerPortalLink` in app.js) — emails the link or returns it to copy.
+
+**Verified:** `py_compile` + `node --check` clean. 30 TestClient checks (isolated file-mode DB,
+Stripe+email forced dormant): token mint/reuse/regenerate-invalidates-old, **field-crew 403** on
+portal-link, public data view + sanitization (asserts no margin/cost/expense substrings leak), page
+serves, sign validation (needs name+agree), **sign→Won handoff** for opp-linked job vs `Approved` for
+a plain job, pay→not_configured (dormant), bad-token→404 on data/sign/pay, dormant-safe email queue.
+
+**Fred-gated to go fully live:** `EMAIL_WEBHOOK_URL` (so the portal link actually emails instead of
+queuing) and `STRIPE_API_KEY`/`STRIPE_WEBHOOK_SECRET` (so the Pay button works) — both already
+documented; the portal works for view/sign today regardless.
+

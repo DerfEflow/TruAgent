@@ -297,7 +297,7 @@ def _normalize_db(db) -> bool:
 
     for _key in ("weather_profiles", "templates", "sds", "employees",
                  "parties", "opportunities", "equipment", "doc_chunks",
-                 "measurements"):
+                 "measurements", "portal_tokens"):
         if _key not in db:
             db[_key] = {}
             needs_migration = True
@@ -848,6 +848,16 @@ class ManualGeometryRequest(BaseModel):
 class MeasurementToAlphaRequest(BaseModel):
     job_id: Optional[str] = None               # target job (created if absent + opportunity_id given)
     opportunity_id: Optional[str] = None
+
+# P3-16 customer portal (tokenized, login-less)
+class PortalLinkRequest(BaseModel):
+    send_to: Optional[str] = None              # email the link (dormant-safe); else just returns it
+    regenerate: Optional[bool] = False         # mint a fresh token (invalidates the old link)
+
+class PortalSignRequest(BaseModel):
+    token: str
+    name: str                                  # the customer's typed full name = their signature
+    agreed: bool = True
 
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
@@ -4540,11 +4550,26 @@ async def create_payment_link(job_id: str, req: PaymentLinkRequest,
     job = db["jobs"].get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    amount_cents = int(round(float(req.amount) * 100))
+    payment = _make_job_checkout(job, job_id, req.amount, req.description, current_user["email"])
+    job.setdefault("payments", []).append(payment)
+    save_db(db)
+    return {"status": "ok", "payment": payment, "url": payment["url"]}
+
+
+def _app_base_url() -> str:
+    return (os.getenv("RAILWAY_STATIC_URL") or
+            "truagent-production.up.railway.app").replace("https://", "").rstrip("/")
+
+
+def _make_job_checkout(job: dict, job_id: str, amount, description, created_by: str) -> dict:
+    """Create a Stripe Checkout session for a job amount and return the payment dict
+    (caller saves it onto job['payments']). Shared by the staff endpoint + the
+    customer portal so both go through the same Truline-account, hosted-page flow."""
+    amount_cents = int(round(float(amount) * 100))
     if amount_cents < 50:
         raise HTTPException(status_code=400, detail="Amount must be at least $0.50")
-    base = (os.getenv("RAILWAY_STATIC_URL") or "truagent-production.up.railway.app").replace("https://", "").rstrip("/")
-    name = req.description or f"Truline Roofing — {job.get('client_name') or job_id}"
+    base = _app_base_url()
+    name = description or f"Truline Roofing — {job.get('client_name') or job_id}"
     data = {
         "mode": "payment",
         "success_url": f"https://{base}/static/thanks.html",
@@ -4554,15 +4579,12 @@ async def create_payment_link(job_id: str, req: PaymentLinkRequest,
         "line_items[0][price_data][unit_amount]": amount_cents,
         "line_items[0][price_data][product_data][name]": name,
         "metadata[job_id]": job_id,
-        "metadata[created_by]": current_user["email"],
+        "metadata[created_by]": created_by,
     }
     session = _stripe_post("/v1/checkout/sessions", data)
-    payment = {"session_id": session.get("id"), "url": session.get("url"),
-               "amount": req.amount, "description": name, "status": "pending",
-               "created_by": current_user["email"], "created_at": datetime.now().isoformat()}
-    job.setdefault("payments", []).append(payment)
-    save_db(db)
-    return {"status": "ok", "payment": payment, "url": payment["url"]}
+    return {"session_id": session.get("id"), "url": session.get("url"),
+            "amount": float(amount), "description": name, "status": "pending",
+            "created_by": created_by, "created_at": datetime.now().isoformat()}
 
 
 @app.get("/job/{job_id}/payments")
@@ -4608,6 +4630,219 @@ async def stripe_webhook(request: Request):
                 "source": "stripe", "paid_at": datetime.now().isoformat()}
             save_db(db)
     return {"status": "ok", "event": event.get("type")}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P3-16 — Customer portal (tokenized, login-less)
+# ───────────────────────────────────────────────────────────────────────────────
+# Customers never log into TruAgent. A per-job capability token reaches a single
+# public page (a link TruAgent emails) where they can: view the proposal/estimate,
+# e-sign (accept), pay via the same Stripe hosted page (P3-15), and track job
+# status. The token IS the authorization — no other auth. The public data view is
+# sanitized: it exposes the quoted price + scope + status, never internal costs,
+# margins, expenses, or internal notes. Emailing the link is dormant-safe.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Customer-friendly status ladder derived from the job's workflow_stage.
+_PORTAL_STATUS_LADDER = ["Quote", "Approved", "Scheduled", "In Progress", "Complete"]
+# Map the various internal stage vocabularies onto the customer ladder.
+_PORTAL_STAGE_MAP = {
+    "lead": "Quote", "quote": "Quote", "estimating": "Quote", "proposal": "Quote",
+    "negotiation": "Quote", "new lead": "Quote", "site survey": "Quote",
+    "measured/cores": "Quote", "won": "Approved", "approved": "Approved",
+    "scheduled": "Scheduled", "in progress": "In Progress", "complete": "Complete",
+    "completed": "Complete",
+}
+
+
+def _portal_resolve(db: dict, token: str):
+    """Return (token_rec, job) for a portal token, or (None, None)."""
+    rec = (db.get("portal_tokens") or {}).get(token or "")
+    if not rec:
+        return None, None
+    job = db.get("jobs", {}).get(rec.get("job_id"))
+    if not job:
+        return None, None
+    return rec, job
+
+
+def _portal_view(db: dict, job: dict, job_id: str) -> dict:
+    """Sanitized, customer-facing bundle. No costs/margins/expenses/internal notes."""
+    budget = job.get("budget") or {}
+    warranty = job.get("warranty") or {}
+    # Quoted price the customer sees = contract value (NOT internal cost/margin data).
+    contract_value = budget.get("contract_value") or job.get("contract_value")
+    payments = job.get("payments", [])
+    paid_total = sum(float(p.get("amount") or 0) for p in payments if p.get("status") == "paid")
+    outstanding = None
+    if contract_value:
+        outstanding = max(0.0, round(float(contract_value) - paid_total, 2))
+    # e-sign / acceptance status
+    esigns = job.get("esign_records", [])
+    signed = next((r for r in esigns if r.get("status") in ("signed", "accepted")), None)
+    # status ladder
+    stage = (job.get("workflow_stage") or job.get("status") or "Quote")
+    friendly = _PORTAL_STAGE_MAP.get(str(stage).strip().lower(), "Quote")
+    pct = job.get("pct_complete")
+    return {
+        "company": "Truline Roofing",
+        "job_ref": job_id,
+        "client_name": job.get("client_name"),
+        "address": job.get("address"),
+        "proposal": {
+            "contract_value": contract_value,
+            "system": budget.get("system") or job.get("coating_system"),
+            "substrate": budget.get("substrate"),
+            "sqft": budget.get("sqft"),
+            "dry_mil_target": budget.get("dry_mil_target"),
+            "warranty_years": warranty.get("term_years"),
+            "warranty_type": warranty.get("warranty_type"),
+            "manufacturer": warranty.get("manufacturer"),
+            "proposal_document_id": job.get("proposal_document_id"),
+        },
+        "signature": {
+            "signed": bool(signed),
+            "signed_by": (signed or {}).get("recipient_name") or (signed or {}).get("signed_name"),
+            "signed_at": (signed or {}).get("signed_at"),
+        },
+        "payment": {
+            "stripe_enabled": STRIPE_ENABLED,
+            "contract_value": contract_value,
+            "paid_total": paid_total,
+            "outstanding": outstanding,
+            "fully_paid": bool(contract_value) and outstanding == 0,
+        },
+        "status": {
+            "current": friendly,
+            "ladder": _PORTAL_STATUS_LADDER,
+            "step_index": _PORTAL_STATUS_LADDER.index(friendly) if friendly in _PORTAL_STATUS_LADDER else 0,
+            "pct_complete": pct,
+        },
+    }
+
+
+@app.post("/job/{job_id}/portal-link")
+async def create_portal_link(job_id: str, req: PortalLinkRequest,
+                             current_user: dict = Depends(get_manager_or_above)):
+    """Mint (or reuse) a per-job customer-portal link and optionally email it
+    (dormant-safe). The customer uses it with no login."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    tokens = db.setdefault("portal_tokens", {})
+    token = job.get("portal_token")
+    if token and req.regenerate:
+        tokens.pop(token, None)
+        token = None
+    if not token or token not in tokens:
+        token = secrets.token_urlsafe(24)
+        job["portal_token"] = token
+        tokens[token] = {"job_id": job_id, "created_at": datetime.now().isoformat(),
+                         "created_by": current_user["email"]}
+    url = f"https://{_app_base_url()}/portal?token={token}"
+    email_result = None
+    to = req.send_to or job.get("customer_email")
+    if to:
+        body = (f"Hello{(' ' + job.get('client_name')) if job.get('client_name') else ''},\n\n"
+                f"You can view your Truline Roofing proposal, approve it, pay, and track "
+                f"your project here:\n\n{url}\n\nThank you,\nTruline Roofing")
+        email_result = _send_email_or_log(db, to, "Your Truline Roofing project", body,
+                                          current_user["email"])
+    save_db(db)
+    return {"status": "ok", "url": url, "token": token,
+            "emailed": email_result, "sent_to": to}
+
+
+@app.get("/portal", response_class=HTMLResponse)
+def portal_page():
+    """Public customer page (token-gated client-side, data-gated server-side)."""
+    return FileResponse("static/portal.html")
+
+
+@app.get("/portal/data")
+async def portal_data(token: str):
+    """Public: the sanitized customer view for a token. 404 on a bad/expired token."""
+    db = load_db()
+    rec, job = _portal_resolve(db, token)
+    if not job:
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+    # Record a view for the staff timeline (best-effort, throttled to once/day).
+    today = datetime.now().strftime("%Y-%m-%d")
+    if rec.get("last_viewed_day") != today:
+        rec["last_viewed_day"] = today
+        job.setdefault("timeline", []).append(
+            {"event": "portal_viewed", "at": datetime.now().isoformat()})
+        save_db(db)
+    return {"status": "ok", "portal": _portal_view(db, job, rec["job_id"])}
+
+
+@app.post("/portal/sign")
+async def portal_sign(req: PortalSignRequest):
+    """Public: the customer accepts/e-signs the proposal from the portal. Records the
+    signature (reusing the esign_records shape) and, if the job came from an
+    opportunity, fires the same Won handoff as the e-sign webhook."""
+    if not req.agreed or not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="Type your name and check the agreement box to sign.")
+    db = load_db()
+    rec, job = _portal_resolve(db, req.token)
+    if not job:
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+    now = datetime.now().isoformat()
+    esign_record = {
+        "document_id": job.get("proposal_document_id"),
+        "document_type": "proposal",
+        "recipient_name": req.name.strip(),
+        "signed_name": req.name.strip(),
+        "status": "signed",
+        "method": "customer_portal",
+        "signed_at": now,
+    }
+    job.setdefault("esign_records", []).append(esign_record)
+    job.setdefault("timeline", []).append(
+        {"event": "proposal_signed_portal", "by": req.name.strip(), "at": now})
+    # If this job originated from an opportunity, run the Won handoff.
+    opp_id = job.get("origin_opportunity_id")
+    advanced = False
+    if opp_id and opp_id in db.get("opportunities", {}):
+        _apply_won_handoff(db, db["opportunities"][opp_id], "customer_portal")
+        advanced = True
+    elif (job.get("workflow_stage") or "").lower() in ("quote", "lead", "proposal", ""):
+        job["workflow_stage"] = "Approved"
+    save_db(db)
+    return {"status": "ok", "signed": True, "advanced_to_won": advanced}
+
+
+@app.post("/portal/pay")
+async def portal_pay(token: str):
+    """Public: the customer starts payment from the portal. Creates a Stripe Checkout
+    link for the outstanding balance (or contract value) and returns the URL to
+    redirect to. Dormant-safe when Stripe isn't configured."""
+    db = load_db()
+    rec, job = _portal_resolve(db, token)
+    if not job:
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+    if not STRIPE_ENABLED:
+        return {"status": "not_configured",
+                "message": "Online payment isn't enabled yet — Truline will contact you."}
+    budget = job.get("budget") or {}
+    contract_value = budget.get("contract_value") or job.get("contract_value")
+    paid_total = sum(float(p.get("amount") or 0) for p in job.get("payments", [])
+                     if p.get("status") == "paid")
+    amount = None
+    if contract_value:
+        amount = round(float(contract_value) - paid_total, 2)
+    if not amount or amount < 0.5:
+        return {"status": "nothing_due",
+                "message": "There's no balance due online right now."}
+    payment = _make_job_checkout(job, rec["job_id"], amount,
+                                 f"Truline Roofing — {job.get('client_name') or rec['job_id']}",
+                                 "customer_portal")
+    job.setdefault("payments", []).append(payment)
+    job.setdefault("timeline", []).append(
+        {"event": "portal_payment_started", "amount": amount, "at": datetime.now().isoformat()})
+    save_db(db)
+    return {"status": "ok", "url": payment["url"], "amount": amount}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

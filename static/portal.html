@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Truline Roofing — Your Project</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+  <style>
+    .portal-wrap { max-width: 720px; margin: 0 auto; padding: 1.25rem; }
+    .portal-head { display:flex; align-items:center; gap:.75rem; margin-bottom:1rem; }
+    .portal-head img { height: 44px; }
+    .pcard { background: var(--panel, #fff); border: 1px solid var(--border, #e2e8f0);
+             border-radius: 10px; padding: 1.1rem; margin-bottom: 1rem; }
+    .pcard h3 { margin: 0 0 .6rem; }
+    .prow { display:flex; justify-content:space-between; gap:1rem; padding:.3rem 0;
+            border-bottom:1px solid var(--border,#eef2f7); font-size:.92rem; }
+    .prow:last-child { border-bottom:0; }
+    .price { font-size: 1.8rem; font-weight: 800; }
+    .steps { display:flex; gap:.35rem; flex-wrap:wrap; margin-top:.4rem; }
+    .step { flex:1; min-width:90px; text-align:center; font-size:.72rem; padding:.4rem .2rem;
+            border-radius:6px; background:var(--bg,#f1f5f9); color:#64748b; }
+    .step.done { background:#22c55e; color:#fff; }
+    .step.current { background:#1e40af; color:#fff; }
+    .btn-row { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.6rem; }
+    .muted { color:#64748b; font-size:.85rem; }
+    .ok-badge { color:#16a34a; font-weight:600; }
+    #portal-error { text-align:center; padding:3rem 1rem; }
+  </style>
+</head>
+<body>
+  <div class="portal-wrap">
+    <div class="portal-head">
+      <img src="/static/logo.png" alt="Truline Roofing">
+      <div><strong style="font-size:1.15rem">TRULINE ROOFING</strong>
+        <div class="muted">Your project</div></div>
+    </div>
+
+    <div id="portal-error" class="hidden">
+      <h2>Link not found</h2>
+      <p class="muted">This link is invalid or has expired. Please contact Truline Roofing for a new one.</p>
+    </div>
+
+    <div id="portal-body" class="hidden">
+      <div class="pcard">
+        <h3 id="p-client">Your proposal</h3>
+        <div class="muted" id="p-address"></div>
+        <div class="price" id="p-value" style="margin:.5rem 0"></div>
+        <div id="p-scope"></div>
+      </div>
+
+      <div class="pcard">
+        <h3>Project status</h3>
+        <div class="steps" id="p-steps"></div>
+        <div class="muted" id="p-pct" style="margin-top:.5rem"></div>
+      </div>
+
+      <div class="pcard" id="p-sign-card">
+        <h3>Approve your proposal</h3>
+        <div id="p-sign-area"></div>
+      </div>
+
+      <div class="pcard" id="p-pay-card">
+        <h3>Payment</h3>
+        <div id="p-pay-area"></div>
+      </div>
+
+      <p class="muted" style="text-align:center">
+        Questions? Reply to the email we sent, or call Truline Roofing.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const token = new URLSearchParams(location.search).get('token') || '';
+    const $ = id => document.getElementById(id);
+    const money = n => (n == null) ? '—' : '$' + Number(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+    async function load() {
+      if (!token) { showError(); return; }
+      try {
+        const res = await fetch('/portal/data?token=' + encodeURIComponent(token));
+        if (!res.ok) { showError(); return; }
+        render((await res.json()).portal);
+      } catch (e) { showError(); }
+    }
+    function showError() { $('portal-error').classList.remove('hidden'); $('portal-body').classList.add('hidden'); }
+
+    function render(p) {
+      $('portal-body').classList.remove('hidden');
+      $('portal-error').classList.add('hidden');
+      $('p-client').textContent = p.client_name ? `Proposal for ${p.client_name}` : 'Your proposal';
+      $('p-address').textContent = p.address || '';
+      const pr = p.proposal || {};
+      $('p-value').textContent = pr.contract_value ? money(pr.contract_value) : 'Quote in progress';
+      const scope = [];
+      if (pr.system) scope.push(['Coating system', pr.system]);
+      if (pr.substrate) scope.push(['Substrate', pr.substrate]);
+      if (pr.sqft) scope.push(['Area', Number(pr.sqft).toLocaleString() + ' sq ft']);
+      if (pr.warranty_years) scope.push(['Warranty', `${pr.warranty_years} yr${pr.warranty_type ? ' ' + pr.warranty_type : ''}`]);
+      if (pr.manufacturer) scope.push(['Manufacturer', pr.manufacturer]);
+      $('p-scope').innerHTML = scope.map(([k, v]) =>
+        `<div class="prow"><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>`).join('')
+        || '<div class="muted">Your detailed scope will appear here.</div>';
+
+      // status ladder
+      const st = p.status || {};
+      $('p-steps').innerHTML = (st.ladder || []).map((s, i) => {
+        const cls = i < st.step_index ? 'done' : (i === st.step_index ? 'current' : '');
+        return `<div class="step ${cls}">${esc(s)}</div>`;
+      }).join('');
+      $('p-pct').textContent = (st.pct_complete != null) ? `Field progress: ${st.pct_complete}% complete` : '';
+
+      // signature
+      const sg = p.signature || {};
+      if (sg.signed) {
+        $('p-sign-area').innerHTML = `<p class="ok-badge">✓ Approved${sg.signed_by ? ' by ' + esc(sg.signed_by) : ''}${sg.signed_at ? ' on ' + esc(sg.signed_at.slice(0,10)) : ''}.</p>`;
+      } else {
+        $('p-sign-area').innerHTML = `
+          <p class="muted">Type your full name and check the box to approve this proposal. This is your electronic signature.</p>
+          <input id="sign-name" placeholder="Your full name" style="width:100%;margin:.4rem 0">
+          <label class="muted" style="display:block"><input type="checkbox" id="sign-agree"> I approve this proposal and authorize Truline Roofing to proceed.</label>
+          <div class="btn-row"><button class="btn-primary" onclick="doSign()">Approve &amp; sign</button></div>
+          <div id="sign-msg" class="muted"></div>`;
+      }
+
+      // payment
+      const pay = p.payment || {};
+      if (pay.fully_paid) {
+        $('p-pay-area').innerHTML = `<p class="ok-badge">✓ Paid in full. Thank you!</p>`;
+      } else if (!pay.stripe_enabled) {
+        $('p-pay-area').innerHTML = `<p class="muted">Online payment isn't enabled yet. Truline will arrange payment with you directly.</p>`;
+      } else if (pay.outstanding != null && pay.outstanding > 0) {
+        $('p-pay-area').innerHTML = `
+          <div class="prow"><span class="muted">Contract</span><span>${money(pay.contract_value)}</span></div>
+          <div class="prow"><span class="muted">Paid</span><span>${money(pay.paid_total)}</span></div>
+          <div class="prow"><span><strong>Balance due</strong></span><span><strong>${money(pay.outstanding)}</strong></span></div>
+          <div class="btn-row"><button class="btn-primary" onclick="doPay()">Pay securely</button></div>
+          <p class="muted" style="margin-top:.3rem">You'll be taken to Stripe's secure payment page.</p>
+          <div id="pay-msg" class="muted"></div>`;
+      } else {
+        $('p-pay-area').innerHTML = `<p class="muted">No balance is due online right now.</p>`;
+      }
+    }
+
+    async function doSign() {
+      const name = ($('sign-name').value || '').trim();
+      const agree = $('sign-agree').checked;
+      const msg = $('sign-msg');
+      if (!name || !agree) { msg.textContent = 'Please type your name and check the box.'; return; }
+      msg.textContent = 'Submitting…';
+      try {
+        const res = await fetch('/portal/sign', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, name, agreed: true }) });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); msg.textContent = e.detail || 'Could not submit.'; return; }
+        load();
+      } catch (e) { msg.textContent = 'Network error — please try again.'; }
+    }
+
+    async function doPay() {
+      const msg = $('pay-msg');
+      msg.textContent = 'Creating secure checkout…';
+      try {
+        const res = await fetch('/portal/pay?token=' + encodeURIComponent(token), { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok' && data.url) { location.href = data.url; return; }
+        msg.textContent = data.message || 'Payment is unavailable right now.';
+      } catch (e) { msg.textContent = 'Network error — please try again.'; }
+    }
+
+    load();
+  </script>
+</body>
+</html>
