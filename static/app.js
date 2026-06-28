@@ -391,7 +391,9 @@ async function refreshJobs() {
           // Operational (non-financial), so available to all roles — matches
           // what the AI agent already lets any user do.
           const jid = job.job_id;
-          const STAGES = ['Lead', 'Quote', 'Approved', 'In Progress', 'Complete'];
+          // Canonical job workflow stages (match main.py JOB_WORKFLOW_STAGES).
+          // "Won" = deal won / ready to schedule (WIP, schedule & anomaly features key off it).
+          const STAGES = ['Lead', 'Quote', 'Approved', 'Won', 'In Progress', 'Complete'];
           const currentStage = job.workflow_stage || '';
           const stageOptions = ['<option value="">Update stage…</option>']
             .concat(STAGES.map(s =>
@@ -1395,6 +1397,7 @@ async function openCustomer(cid) {
       ${jobs.length ? jobs.map(j => `<div style="font-size:.83rem;border-bottom:1px solid var(--border);padding:.35rem 0;display:flex;justify-content:space-between;gap:.5rem;align-items:center">
         <span>${esc(j.client_name || j.job_id)} <span class="help-text">${esc(j.workflow_stage || '')} &middot; ${j.material_orders} order(s)</span></span>
         <span style="display:flex;gap:.25rem">
+          <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="openProposal('${j.job_id}')">Proposal</button>
           <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="makeMaterialOrder('${j.job_id}')">Material order</button>
           <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px" onclick="customerPortalLink('${j.job_id}')">Portal link</button>
           <button class="btn-primary" style="font-size:.7rem;padding:1px 6px" onclick="requestPayment('${j.job_id}')">Request payment</button>
@@ -1421,6 +1424,17 @@ async function requestPayment(jobId) {
     if (r.status === 'not_configured') { alert(r.message); return; }
     prompt('Payment link created — copy it and send to the customer:', r.url);
   } catch (e) { alert('Failed to create payment link: ' + e.message); }
+}
+
+async function openProposal(jobId) {
+  // Staff route needs the Bearer header, so fetch the HTML and open it via a blob URL.
+  try {
+    const res = await fetch(`/job/${jobId}/proposal`, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (!res.ok) { alert('Failed to load proposal'); return; }
+    const html = await res.text();
+    const blob = new Blob([html], { type: 'text/html' });
+    window.open(URL.createObjectURL(blob), '_blank');
+  } catch (e) { alert('Failed to open proposal: ' + e.message); }
 }
 
 async function customerPortalLink(jobId) {

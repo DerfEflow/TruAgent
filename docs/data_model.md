@@ -47,7 +47,11 @@ Keyed by `job_id`. Created locally or synced in from Roofr via Zapier.
   "client_name": "Acme Warehouse",
   "address": "123 Main St",
   "status": "Pending",
-  "workflow_stage": "Lead",        // optional: Lead → Quote → Approved → In Progress → Complete
+  "workflow_stage": "Lead",        // job lifecycle: Lead → Quote → Approved → Won → In Progress → Complete
+                                   //   ("Won" = deal won/ready to schedule; WIP, schedule & anomaly
+                                   //    features key off it. DISTINCT from the opportunity *pipeline*
+                                   //    stages New Lead…Negotiation/Won/Lost. The convert/Won handoff
+                                   //    maps opp stages onto these via _opp_stage_to_job in main.py.)
   "images": [],
   "notes": [ { "note": "...", "added_by": "...", "added_at": "ISO time" } ],
   "invoices": ["INV-1"],           // ids into financials.invoices

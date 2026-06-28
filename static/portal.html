@@ -100,9 +100,10 @@
       if (pr.sqft) scope.push(['Area', Number(pr.sqft).toLocaleString() + ' sq ft']);
       if (pr.warranty_years) scope.push(['Warranty', `${pr.warranty_years} yr${pr.warranty_type ? ' ' + pr.warranty_type : ''}`]);
       if (pr.manufacturer) scope.push(['Manufacturer', pr.manufacturer]);
-      $('p-scope').innerHTML = scope.map(([k, v]) =>
+      $('p-scope').innerHTML = (scope.map(([k, v]) =>
         `<div class="prow"><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>`).join('')
-        || '<div class="muted">Your detailed scope will appear here.</div>';
+        || '<div class="muted">Your detailed scope will appear here.</div>')
+        + `<div class="btn-row"><a class="btn-secondary" href="/portal/proposal?token=${encodeURIComponent(token)}" target="_blank" rel="noopener">View / print full proposal</a></div>`;
 
       // status ladder
       const st = p.status || {};

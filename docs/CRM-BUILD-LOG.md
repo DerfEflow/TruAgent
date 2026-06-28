@@ -209,3 +209,36 @@ a plain job, pay→not_configured (dormant), bad-token→404 on data/sign/pay, d
 queuing) and `STRIPE_API_KEY`/`STRIPE_WEBHOOK_SECRET` (so the Pay button works) — both already
 documented; the portal works for view/sign today regardless.
 
+---
+
+## 2026-06-28 (cont.) — Small stuff DONE: branded proposal doc + stage-vocab reconcile (branch `crm-phase3`)
+
+**A) Branded proposal document (P3-15 leftover).** `_render_proposal_html(job, job_id)` builds a
+Truline-branded, print-ready HTML proposal from the job budget + warranty (no PDF binary dependency —
+the browser's "Save as PDF" produces the PDF). `GET /job/{id}/proposal` (manager+) and
+`GET /portal/proposal?token=` (customer, token-gated). UI: "Proposal" button in the customer-360
+(fetched with the Bearer header → opened via blob URL) and a "View / print full proposal" link in the
+portal. Logo URL made absolute so the blob/staff view renders it.
+
+**B) Stage-vocabulary reconcile (cross-cutting §7).** Root cause: the *opportunity pipeline* vocab
+(New Lead…Won/Lost) was already consistent across the lead door, `/pipeline`, and the kanban — but raw
+pipeline tokens were bleeding into `job.workflow_stage` (convert copied `opp.stage` verbatim; the Won
+handoff wrote "Won"), while the job-stage UI dropdown + `data_model.md` documented a *different*
+production vocab that omitted "Won" — even though WIP/schedule/anomaly readers key off `"Won"`. Fix:
+- Two canonical lists defined once in main.py: `PIPELINE_STAGES` (sales) and `JOB_WORKFLOW_STAGES`
+  = `Lead/Quote/Approved/Won/In Progress/Complete` (production; "Won" retained, it's load-bearing).
+- `/pipeline` returns the `PIPELINE_STAGES` constant (was an inline literal).
+- `_opp_stage_to_job` maps opp→job at the convert/handoff boundary (Won→Won, Lost→Lead, else Quote);
+  the convert endpoint no longer dumps raw "Proposal"/"Negotiation" into jobs.
+- `_normalize_db` migrates legacy jobs holding pipeline-only tokens (Proposal/Negotiation/Estimating/
+  Site Survey/Measured-Cores/New Lead → Quote; Lost → Lead; "Won"/"Lead" untouched). Idempotent.
+- Job-stage dropdown (app.js), the `update_job_status` chat tool description, and `data_model.md`
+  updated to the canonical job list (incl. "Won").
+
+**Verified:** `py_compile` + `node --check` clean. 24 TestClient checks: proposal renders branded
+HTML with price/scope/warranty + absolute logo, **field-crew 403** + 404, portal proposal via token +
+bad-token 404; `/pipeline` returns the constant, legacy migration (Proposal→Quote, Lost→Lead,
+Won/Lead kept), convert maps opp "Proposal"→job "Quote", helper/constant sanity. Full regression: all
+three P3 suites green (P3-14 30, P3-16 30, item-3 24 = 84 checks). No change to the WIP/schedule/
+anomaly "Won" readers (still valid).
+

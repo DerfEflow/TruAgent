@@ -119,8 +119,10 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 - [x] **P3-15 (Stripe payments) DONE 2026-06-22.** `POST /job/{id}/payment-link` (manager+) →
   Stripe Checkout link (Truline account, `STRIPE_API_KEY`); `POST /stripe/webhook` (HMAC-verified,
   `STRIPE_WEBHOOK_SECRET`) marks the job paid + records a financials invoice; "Request payment" button
-  in the customer 360. Verified live (link created + expired, signed webhook marks paid). *Proposals
-  polish (templated proposal doc) still TODO under this item.*
+  in the customer 360. Verified live (link created + expired, signed webhook marks paid).
+  *Proposals polish DONE 2026-06-28:* branded, print-ready proposal document — `GET /job/{id}/proposal`
+  (manager+) + `GET /portal/proposal?token=` (customer) via `_render_proposal_html` (no PDF binary dep;
+  browser "Save as PDF"); "Proposal" button in the customer-360, "View / print full proposal" in the portal.*
 - [x] **P3-16. Customer portal** (view / sign / pay / track) *(DONE 2026-06-28).* Tokenized,
   login-less page (`static/portal.html`) reached at `/portal?token=…` — customers never log into
   TruAgent. Per-job capability token (`POST /job/{id}/portal-link`, manager+, dormant-safe email of
@@ -132,7 +134,13 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
   sign→Won, dormant Stripe+email, bad-token 404s, field-crew 403).
 
 ## 7. Cross-cutting (do alongside)
-- [ ] Reconcile pipeline **stage vocabulary** across lead door, `/pipeline`, and UI (currently mismatched).
+- [x] Reconcile **stage vocabulary** *(DONE 2026-06-28).* Two distinct concepts, each now canonical
+  and defined once in `main.py`: **`PIPELINE_STAGES`** (sales/opportunity — lead door, `/pipeline`,
+  kanban) and **`JOB_WORKFLOW_STAGES`** = `Lead/Quote/Approved/Won/In Progress/Complete` (production —
+  "Won" kept because WIP/schedule/anomaly key off it). The convert/Won-handoff boundary now maps opp
+  stages → job stages via `_opp_stage_to_job` (no more raw "Proposal"/"Negotiation" leaking into jobs);
+  legacy jobs are migrated in `_normalize_db`; the job-stage dropdown + chat tool + `data_model.md`
+  updated to match. Verified by TestClient (migration, convert mapping, `/pipeline` constant).
 - [ ] Per-feature **permission** checks as each item ships (see §2).
 - [ ] Keep `CRM-BUILD-LOG.md` updated every working session.
 - [ ] Treat `BUILD_PROGRESS.md` as legacy; this roadmap supersedes it for CRM work.

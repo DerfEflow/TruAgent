@@ -327,6 +327,18 @@ def _normalize_db(db) -> bool:
         db.setdefault("financials", {})["expenses"] = {}
         needs_migration = True
 
+    # Stage-vocab reconcile: older jobs picked up raw opportunity pipeline tokens
+    # in workflow_stage (the convert endpoint used to copy opp.stage verbatim).
+    # Map any pipeline-only token onto the canonical job vocabulary. "Won", "Lead",
+    # and the other valid job stages are left untouched (idempotent).
+    _PIPELINE_ONLY = {"New Lead", "Site Survey", "Measured/Cores", "Estimating",
+                      "Proposal", "Negotiation", "Lost"}
+    for _job in db.get("jobs", {}).values():
+        _ws = _job.get("workflow_stage")
+        if _ws in _PIPELINE_ONLY:
+            _job["workflow_stage"] = _opp_stage_to_job(_ws)
+            needs_migration = True
+
     return needs_migration
 
 
@@ -1634,7 +1646,7 @@ _TOOL_DEFS = {
         "parameters": {"type": "object", "properties": {
             "job_id": {"type": "string"},
             "status": {"type": "string", "description": "New status, e.g. Pending, In Progress, Complete"},
-            "workflow_stage": {"type": "string", "description": "Optional pipeline stage: Lead, Quote, Approved, In Progress, Complete"}},
+            "workflow_stage": {"type": "string", "description": "Optional job workflow stage: Lead, Quote, Approved, Won, In Progress, Complete"}},
             "required": ["job_id"], "additionalProperties": False}}},
     "add_job_note": {"type": "function", "function": {
         "name": "add_job_note",
@@ -3832,6 +3844,31 @@ _STAGE_FOLLOWUP_DAYS = {
     "Estimating": 2, "Proposal": 2, "Negotiation": 3,
 }
 
+# ── Canonical stage vocabularies (cross-cutting reconcile) ───────────────────
+# Two DISTINCT concepts that previously bled together on the job record:
+#  • PIPELINE_STAGES — the sales/opportunity pipeline (lead door sets "New Lead";
+#    /pipeline + the kanban render this exact list). Defined once here so the three
+#    surfaces can never drift.
+#  • JOB_WORKFLOW_STAGES — the production lifecycle of a job. "Won" = deal won /
+#    ready to schedule and IS load-bearing (WIP report, schedule "needs assignment",
+#    anomaly scan all key off it), so it stays in the list.
+# The convert/handoff boundary maps an opportunity stage to a JOB stage via
+# _opp_stage_to_job so raw pipeline tokens (Proposal/Negotiation/…) never land in
+# job.workflow_stage.
+PIPELINE_STAGES = ["New Lead", "Site Survey", "Measured/Cores", "Estimating",
+                   "Proposal", "Negotiation", "Won", "Lost"]
+JOB_WORKFLOW_STAGES = ["Lead", "Quote", "Approved", "Won", "In Progress", "Complete"]
+_OPP_TO_JOB_STAGE = {
+    "New Lead": "Lead", "Site Survey": "Quote", "Measured/Cores": "Quote",
+    "Estimating": "Quote", "Proposal": "Quote", "Negotiation": "Quote",
+    "Won": "Won", "Lost": "Lead",
+}
+
+
+def _opp_stage_to_job(stage):
+    """Map an opportunity pipeline stage to a job workflow stage (default Quote)."""
+    return _OPP_TO_JOB_STAGE.get(stage, "Quote")
+
 @app.get("/pipeline")
 async def get_pipeline(current_user: dict = Depends(get_current_user)):
     """S30: Sales pipeline — all opportunities by stage."""
@@ -3844,9 +3881,7 @@ async def get_pipeline(current_user: dict = Depends(get_current_user)):
         if isManagerOrAbove := current_user.get("role") in ("manager", "super_admin"):
             entry["contract_value"] = opp.get("contract_value")
         by_stage.setdefault(s, []).append(entry)
-    return {"status": "ok", "pipeline": by_stage,
-            "stages": ["New Lead", "Site Survey", "Measured/Cores", "Estimating",
-                       "Proposal", "Negotiation", "Won", "Lost"]}
+    return {"status": "ok", "pipeline": by_stage, "stages": PIPELINE_STAGES}
 
 @app.put("/pipeline/{opportunity_id}/stage")
 async def advance_opp_stage(opportunity_id: str, req: PipelineStageUpdate,
@@ -3918,7 +3953,7 @@ async def convert_opportunity_to_job(opportunity_id: str, req: ConvertToJobReque
                 "customer_phone": opp.get("phone") or opp.get("customer_phone"),
                 "customer_email": opp.get("email") or opp.get("customer_email"),
                 "status": "Pending",
-                "workflow_stage": req.workflow_stage or opp.get("stage") or "Won",
+                "workflow_stage": req.workflow_stage or _opp_stage_to_job(opp.get("stage")),
                 "source": opp.get("source"),
                 "rep": opp.get("rep"),
                 "contract_value": opp.get("contract_value"),
@@ -4843,6 +4878,125 @@ async def portal_pay(token: str):
         {"event": "portal_payment_started", "amount": amount, "at": datetime.now().isoformat()})
     save_db(db)
     return {"status": "ok", "url": payment["url"], "amount": amount}
+
+
+# ── P3-15 leftover: templated branded proposal document ──────────────────────
+# A print-ready, Truline-branded HTML proposal generated from the job's budget +
+# warranty. No PDF binary dependency — the browser's "Save as PDF" turns it into a
+# polished PDF, and it embeds directly in the customer portal. Manager+ for the
+# staff route; the portal route is token-gated.
+
+def _fmt_money(v):
+    try:
+        return "${:,.2f}".format(float(v))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _render_proposal_html(job: dict, job_id: str) -> str:
+    budget = job.get("budget") or {}
+    warranty = job.get("warranty") or {}
+    client = job.get("client_name") or "Valued Customer"
+    address = job.get("address") or ""
+    contract_value = budget.get("contract_value") or job.get("contract_value")
+    today = datetime.now().strftime("%B %d, %Y")
+    scope_rows = []
+    def row(label, val):
+        if val not in (None, "", 0):
+            scope_rows.append(f"<tr><td class='k'>{label}</td><td>{val}</td></tr>")
+    row("Coating system", budget.get("system") or job.get("coating_system"))
+    row("Substrate", budget.get("substrate"))
+    row("Roof area", f"{int(budget['sqft']):,} sq ft" if budget.get("sqft") else None)
+    row("Dry-mil target", f"{budget.get('dry_mil_target')} mils" if budget.get("dry_mil_target") else None)
+    if warranty.get("term_years"):
+        wt = f"{warranty['term_years']}-year"
+        if warranty.get("warranty_type"):
+            wt += f" {warranty['warranty_type']}"
+        if warranty.get("manufacturer"):
+            wt += f" ({warranty['manufacturer']})"
+        row("Warranty", wt)
+    scope_html = "".join(scope_rows) or "<tr><td colspan='2'>Scope details to follow.</td></tr>"
+    price_html = (f"<div class='price'>{_fmt_money(contract_value)}</div>"
+                  if contract_value else "<div class='price'>Quote in progress</div>")
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Truline Roofing — Proposal {job_id}</title>
+<style>
+  body {{ font-family: Georgia, 'Times New Roman', serif; color:#1f2937; margin:0; background:#f3f4f6; }}
+  .sheet {{ max-width: 8.5in; margin: 0 auto; background:#fff; padding: 0.9in 0.85in; box-shadow:0 1px 6px rgba(0,0,0,.12); }}
+  .head {{ display:flex; align-items:center; justify-content:space-between; border-bottom:3px solid #1e3a8a; padding-bottom:.6rem; }}
+  .head img {{ height:56px; }}
+  .brand {{ font-size:1.5rem; font-weight:700; letter-spacing:.04em; color:#1e3a8a; }}
+  .brand small {{ display:block; font-size:.7rem; letter-spacing:.18em; color:#6b7280; font-weight:400; }}
+  h1 {{ font-size:1.3rem; margin:1.4rem 0 .2rem; }}
+  .meta {{ color:#6b7280; font-size:.9rem; }}
+  .price {{ font-size:2rem; font-weight:800; color:#1e3a8a; margin:.4rem 0; }}
+  table {{ width:100%; border-collapse:collapse; margin:.6rem 0 1.2rem; }}
+  td {{ padding:.45rem .3rem; border-bottom:1px solid #e5e7eb; font-size:.95rem; }}
+  td.k {{ color:#6b7280; width:38%; }}
+  .terms {{ font-size:.82rem; color:#4b5563; line-height:1.5; }}
+  .sigblock {{ display:flex; gap:2rem; margin-top:2.4rem; }}
+  .sig {{ flex:1; }}
+  .sigline {{ border-top:1px solid #374151; margin-top:2.2rem; padding-top:.3rem; font-size:.8rem; color:#6b7280; }}
+  .disclaimer {{ margin-top:1.6rem; font-size:.72rem; color:#9ca3af; font-style:italic; }}
+  .printbar {{ text-align:center; padding:.6rem; }}
+  .printbar button {{ font-size:1rem; padding:.5rem 1.2rem; cursor:pointer; }}
+  @media print {{ body {{ background:#fff; }} .sheet {{ box-shadow:none; padding:0.4in; }} .printbar {{ display:none; }} }}
+</style></head>
+<body>
+  <div class="printbar"><button onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="sheet">
+    <div class="head">
+      <div class="brand">TRULINE ROOFING<small>COMMERCIAL ROOF COATINGS</small></div>
+      <img src="https://{_app_base_url()}/static/logo.png" alt="Truline Roofing">
+    </div>
+    <h1>Roofing Proposal</h1>
+    <div class="meta">Prepared {today} &middot; Reference {job_id}</div>
+    <p style="margin-top:1.2rem"><strong>Prepared for:</strong><br>{client}<br>{address}</p>
+    <h2 style="font-size:1.05rem;margin-bottom:.2rem">Investment</h2>
+    {price_html}
+    <h2 style="font-size:1.05rem;margin:1.2rem 0 .2rem">Scope of work</h2>
+    <table>{scope_html}</table>
+    <h2 style="font-size:1.05rem;margin-bottom:.3rem">Terms</h2>
+    <p class="terms">
+      This proposal covers the roof coating system and scope described above for the property at
+      {address or 'the address on file'}. Pricing is valid for 30 days from the prepared date. Work is
+      performed in accordance with the manufacturer's published specifications and Truline Roofing's
+      standard workmanship practices. Final material quantities and surface preparation are subject to
+      field verification. Payment terms and any change orders will be confirmed in writing.
+    </p>
+    <div class="sigblock">
+      <div class="sig"><div class="sigline">Customer signature / date</div></div>
+      <div class="sig"><div class="sigline">Truline Roofing representative / date</div></div>
+    </div>
+    <p class="disclaimer">
+      Areas and quantities, where shown, may derive from preliminary remote measurement and are not a
+      substitute for final field takeoff. This document is a proposal, not a contract, until signed by
+      both parties.
+    </p>
+  </div>
+</body></html>"""
+
+
+@app.get("/job/{job_id}/proposal", response_class=HTMLResponse)
+async def job_proposal(job_id: str, current_user: dict = Depends(get_manager_or_above)):
+    """Branded, print-ready proposal document for a job (staff view)."""
+    db = load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return HTMLResponse(_render_proposal_html(job, job_id))
+
+
+@app.get("/portal/proposal", response_class=HTMLResponse)
+async def portal_proposal(token: str):
+    """Public: the same branded proposal, reached via the customer's portal token."""
+    db = load_db()
+    rec, job = _portal_resolve(db, token)
+    if not job:
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+    return HTMLResponse(_render_proposal_html(job, rec["job_id"]))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
