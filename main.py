@@ -96,8 +96,14 @@ INBOX_SECRET = _door_secret("INBOX_SECRET", "change_inbox_secret_in_production")
 # P3-15 Stripe payments — how Truline gets paid by customers. The Stripe secret key
 # is for the Truline Roofing account; payment happens on Stripe's hosted page (a link
 # TruAgent emails), so TruAgent itself stays internal. Dormant until STRIPE_API_KEY set.
-STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "").strip()
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+# Accept the wallet's TRUAGENT_-prefixed names as fallbacks so the Railway variable
+# can match Fred's wallet naming convention without a code change either way.
+# (The hosted-Checkout flow is server-side, so only the SECRET key is needed — the
+# publishable key is not used.)
+STRIPE_API_KEY = (os.getenv("STRIPE_API_KEY")
+                  or os.getenv("TRUAGENT_STRIPE_SECRET_KEY") or "").strip()
+STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET")
+                         or os.getenv("TRUAGENT_STRIPE_WEBHOOK_SECRET") or "").strip()
 STRIPE_ENABLED = bool(STRIPE_API_KEY)
 
 # P3-14 DIY roof-measurement estimator — aerial building-footprint → roof-area.

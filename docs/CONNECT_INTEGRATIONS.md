@@ -115,14 +115,20 @@ area into a job's estimate.
 
 ---
 
-## 7. Stripe Payments  *(Phase 3 — feature not built yet)*
+## 7. Stripe Payments  *(P3-15 BUILT; payment links + customer-portal pay + paid webhook)*
 **This is how customers pay you. TruAgent stays internal; customers pay on Stripe's page.**
-1. Create/log into **Stripe**. In the Dashboard → **Developers → API keys**, get the **Secret key**.
-2. **Developers → Webhooks** → add an endpoint (Claude will give the exact URL once built, e.g.
-   `…/stripe/webhook`) and copy the **Signing secret**.
-3. Give Claude both keys → Claude builds: "create payment link/invoice for a job" → emails the
-   customer the Stripe link → Stripe webhook marks the job paid.
-4. **Set on Railway:** `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`.
+1. Create/log into **Stripe**. In the Dashboard → **Developers → API keys**, get the **Secret key**
+   (the `sk_live_…` for the Trulineroofing account). The **publishable key is NOT needed** — the
+   hosted-Checkout flow is fully server-side.
+2. **Developers → Webhooks** → add an endpoint
+   `https://truagent-production.up.railway.app/stripe/webhook`, subscribe to
+   `checkout.session.completed`, and copy the **Signing secret** (`whsec_…`).
+3. **Set on Railway (two variables):**
+   - `STRIPE_API_KEY` = the secret key  *(or name it `TRUAGENT_STRIPE_SECRET_KEY` — the app accepts
+     either)*
+   - `STRIPE_WEBHOOK_SECRET` = the signing secret  *(or `TRUAGENT_STRIPE_WEBHOOK_SECRET`)*
+> Once both are set, the "Request payment" button, the customer-portal **Pay** button, and the paid
+> webhook all go live. Until then payment cleanly reports "not configured".
 
 ---
 
