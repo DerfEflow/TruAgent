@@ -59,7 +59,10 @@ endpoint must declare its dependency (`Depends(get_manager_or_above)` etc.).
 | SMS | outbound | Zapier → Twilio | `SMS_WEBHOOK_URL` | 🔲 needs Fred OAuth | cadence, inbox send |
 | Email/SMS | **inbound** | Zapier email-parser / Twilio inbound → `/inbox/webhook` | `INBOX_SECRET` | ⚙️ code LIVE; needs Fred to set `INBOX_SECRET` + wire the Zaps | unified comms inbox |
 | E-signature | both | `/pipeline/{id}/esign-send` + `/esign/webhook` | `ESIGN_WEBHOOK_URL`, `ESIGN_SECRET` | ⚠️ partial (no UI, url unset) | proposals |
-| 1ESX measurements | both | 1ESX REST API | `ESX_API_KEY` (new) | 🔲 NEW (Phase 3) | roof measurements |
+| DIY measurements | inbound | OSM/Overpass + Nominatim (keyless) | — | ✅ LIVE (P3-14) | roof footprint/area, keyless |
+| Google Solar (opt) | inbound | Solar buildingInsights | `GOOGLE_SOLAR_API_KEY` | ⚠️ dormant (Fred-gated) | optional roof-area cross-check |
+| MS footprints (opt) | inbound | point-query service | `MS_FOOTPRINTS_URL` | ⚠️ dormant (Fred-gated) | optional footprint source |
+| 1ESX measurements | both | 1ESX REST API | `ESX_API_KEY` | 🔲 OPTIONAL — only if Fred wants survey-grade alongside DIY | roof measurements |
 | Stripe payments | both | Stripe API + webhook | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (new) | 🔲 NEW (Phase 3) | collect payment |
 | Cron/scheduler | — | in-process + `/cron/tick` | `CRON_SECRET`, `SCHEDULER_ENABLED` | ✅ LIVE | cadence/SLA/review timers |
 
@@ -101,7 +104,18 @@ Email/SMS connect, Roofr API key (or accept inbound-only), 1ESX account, Stripe 
 - [x] **P2-13. Lead-source attribution / ROI.** Win-rate + revenue by source (extends win/loss rollups).
 
 ## 6. Phase 3 — The bigger build
-- [ ] **P3-14. 1ESX measurements integration** (order → parse XML area/parapet/penetrations → pre-fill Alpha). Brief §4.
+- [x] **P3-14. Measurements — DIY aerial estimator** *(DONE 2026-06-28; Fred chose DIY over paid 1ESX).*
+  Address → geocode (Nominatim, keyless) → open building footprints (OSM/Overpass w/ mirror
+  failover, keyless) → local equal-area projection → footprint area/perimeter/bbox → roof-area
+  estimate (footprint × slope, + waste) → confidence + warnings → human-correctable outline →
+  AI verify-ONLY (never measures). Endpoints (all manager+): `POST /measurements/estimate`
+  (order-by-address or from a job/opp), `GET /measurements`, `GET /measurement/{id}`,
+  `POST /measurement/{id}/select-candidate`, `/manual`, `/ai-review`, `/to-alpha` (pre-fills the
+  same `budget` shape Alpha sends to `/alpha/webhook`). UI: "Measure" tab. Dormant-safe paid
+  sources (Google Solar, MS footprints) degrade gracefully. Verified: 30 TestClient checks +
+  live OSM end-to-end (Empire State Bldg footprint within ~1%). **Fred-gated (optional):**
+  `GOOGLE_SOLAR_API_KEY` (roof-area cross-check), `MS_FOOTPRINTS_URL` (MS point-query service),
+  paid 1ESX only if he later wants survey-grade numbers alongside DIY.
 - [x] **P3-15 (Stripe payments) DONE 2026-06-22.** `POST /job/{id}/payment-link` (manager+) →
   Stripe Checkout link (Truline account, `STRIPE_API_KEY`); `POST /stripe/webhook` (HMAC-verified,
   `STRIPE_WEBHOOK_SECRET`) marks the job paid + records a financials invoice; "Request payment" button

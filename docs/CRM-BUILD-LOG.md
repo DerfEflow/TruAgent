@@ -121,3 +121,54 @@ P3-15 Stripe payments, P3-16 customer portal.
 **Remaining Phase 3:** P3-14 1ESX (needs ESX account/API key), P3-16 customer portal (decide if wanted),
 proposals-polish doc. **2a still pending Fred:** approve Gmail+Twilio OAuth links so email/SMS send live.
 
+---
+
+## 2026-06-28 — P3-14 DIY roof-measurement estimator DONE (branch `crm-phase3`)
+
+Fred chose **DIY over paid 1ESX**. Built the aerial building-footprint / roof-area estimator from
+`aerial_building_footprint_roof_area_estimator_build_spec.md` (now committed). Geometry holds the
+tape measure; AI only verifies.
+
+**Pipeline:** address (or lat/lon, or pulled from a job/opp) → geocode (`_geocode`, Nominatim,
+keyless) → open building footprints (`_overpass_buildings`, OSM/Overpass, **keyless**, with mirror
+failover across 4 endpoints because the main one 504s constantly) → local tangent-plane
+equal-area projection (`_project_xy`, sub-0.1% at building scale, no geo stack needed) → shoelace
+area + perimeter + bbox dims (`_measure_geometry`, holes subtract, multipolygon-aware) → candidate
+ranking + 0–100 confidence (`_score_candidate`: source priority + point-in-footprint + size
+reasonableness) → roof-area estimate (`_roof_estimate`: footprint × slope_factor, + waste %) →
+warnings + disclaimer. Human-correctable outline + AI **verify-only** (`_ai_measurement_review`:
+reviews metadata, never imagery, never claims to measure; returns advisory JSON).
+
+**Backend (main.py):** new constants (`OVERPASS_API_URL`+mirrors, `GOOGLE_SOLAR_API_KEY`,
+`MS_FOOTPRINTS_URL`, slope/waste defaults, unit consts, `import math`). Models `MeasureRequest`/
+`MeasureOptions`/`SelectCandidateRequest`/`ManualGeometryRequest`/`MeasurementToAlphaRequest`.
+`db["measurements"]` added to `_normalize_db`. Endpoints (all `Depends(get_manager_or_above)`):
+`POST /measurements/estimate`, `GET /measurements`, `GET /measurement/{id}`,
+`POST /measurement/{id}/select-candidate` · `/manual` · `/ai-review` · `/to-alpha`. `_to-alpha`
+writes the **same `budget` shape Alpha sends to `/alpha/webhook`** (`sqft`=roof area, footprint,
+perimeter, source markers) onto a linked/created job. `_create_completion` gained a `**extra`
+passthrough so the AI review can request `response_format=json_object`.
+
+**Frontend:** "Measure" tab (manager-only) — address/job + radius/slope/waste/AI/solar controls →
+result card (roof area, footprint, material area, perimeter, dims, source link, confidence badge,
+warnings, AI advisory, OSM + Google-Maps verify links), multi-candidate picker, manual-correction
+GeoJSON editor, "Pre-fill Alpha baseline" button, recent-measurements list.
+
+**Sources:** OSM/Overpass + Nominatim are keyless (primary). Paid/keyed sources are **dormant-safe**:
+`_google_solar_roof_area` (Fred-gated `GOOGLE_SOLAR_API_KEY`) and `_ms_footprints` (Fred-gated
+`MS_FOOTPRINTS_URL`) both return None/[] + a warning when unset — they never break the estimate.
+County-GIS connector slots into the ladder next when wanted.
+
+**Verified:** `py_compile` + `node --check` clean. 30 in-process TestClient checks against an
+isolated file-mode DB (pure geometry: 100×50 m rect → 5000 m²/300 m perimeter, hole subtraction,
+point-in-poly, scoring; endpoints: offline→manual_required, manual→estimated+roof_estimate,
+to-alpha writes budget.sqft, select-candidate, AI review advisory disclaimer; **field crew 403 on
+estimate/list/get/ai-review/to-alpha**). **Live** end-to-end (network): Empire State Bldg →
+Nominatim geocode + Overpass mirror failover → auto-selected way/34633854 at 82,987 sqft (~1% of
+the true ~83,800 sqft), 13 candidates → selection-recommended + multi-building warning.
+
+**Fred-gated (optional, none block the feature):** `GOOGLE_SOLAR_API_KEY`, `MS_FOOTPRINTS_URL`,
+paid 1ESX (only if survey-grade wanted alongside DIY). **Future polish:** in-app Leaflet map draw
+editor (today manual correction is a GeoJSON textarea + external OSM/Maps verify links); county-GIS
+connector.
+

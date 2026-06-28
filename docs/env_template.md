@@ -25,6 +25,9 @@ dormant — the app runs and is fully reviewable without any of them.
 | `OPENAI_MODEL` | Which OpenAI chat model the AI agent uses | Optional | Defaults to `gpt-4o`; falls back to `OPENAI_FALLBACK_MODEL` if rejected |
 | `OPENAI_FALLBACK_MODEL` | Known-good model used if `OPENAI_MODEL` is unavailable | Optional | Defaults to `gpt-4o-mini` |
 | `DATA_DIR` | Folder holding `db.json` + uploaded `documents/` | **Production: set to a mounted persistent volume** (e.g. `/data` on Railway) so data survives redeploys | Defaults to the project folder (fine for local dev; **ephemeral on Railway if left unset**) |
+| `OVERPASS_API_URL` | Roof-measure (P3-14) building-footprint source (OSM Overpass). Keyless. | Optional override | Defaults to the public Overpass endpoint; the estimator also fails over to known mirrors automatically |
+| `GOOGLE_SOLAR_API_KEY` | Roof-measure (P3-14) **optional** roof-area cross-check via Google Solar buildingInsights | console.cloud.google.com → Solar API | Solar cross-check is skipped (estimate stands on open footprints + geometry) |
+| `MS_FOOTPRINTS_URL` | Roof-measure (P3-14) **optional** Microsoft Building Footprints point-query service (there is no keyless point API for the raw MS dataset) | a service you host exposing `?lat&lon&radius_m`→GeoJSON | MS source is skipped; OSM/Overpass is the keyless primary |
 | `SCHEDULER_ENABLED` | Built-in in-process scheduler that runs the db-only scans on a timer (compliance + anomaly scans daily, hub heartbeat hourly) — no external cron needed; last-run stamps persist in `db.json` so it's restart-safe | Optional | Defaults to **on**; set to `0` to disable (e.g. if you switch to an external cron driving `/cron/tick`) |
 
 ## Generating strong secret values

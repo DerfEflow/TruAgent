@@ -10,6 +10,7 @@ import os
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import threading
 import time
@@ -98,6 +99,32 @@ INBOX_SECRET = _door_secret("INBOX_SECRET", "change_inbox_secret_in_production")
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 STRIPE_ENABLED = bool(STRIPE_API_KEY)
+
+# P3-14 DIY roof-measurement estimator — aerial building-footprint → roof-area.
+# Geometry-first: open building polygons (OSM/Overpass, keyless) + local equal-area
+# projection do the measuring; AI only verifies/flags, never measures. All sources
+# below that need a key are dormant-safe (degrade gracefully when unset).
+#   OVERPASS_API_URL    — public OSM Overpass endpoint (keyless; overridable mirror)
+#   GOOGLE_SOLAR_API_KEY— Fred-gated, optional roof-area cross-check (Solar API)
+#   MS_FOOTPRINTS_URL   — Fred-gated, optional Microsoft footprints point-query service
+# The main Overpass endpoint is frequently overloaded (504s); we fail over across
+# public mirrors so a single flaky endpoint never sinks the estimate. A configured
+# OVERPASS_API_URL is tried first.
+OVERPASS_API_URL = os.getenv(
+    "OVERPASS_API_URL", "https://overpass-api.de/api/interpreter").strip()
+_OVERPASS_MIRRORS = [
+    OVERPASS_API_URL,
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+GOOGLE_SOLAR_API_KEY = os.getenv("GOOGLE_SOLAR_API_KEY", "").strip()
+MS_FOOTPRINTS_URL = os.getenv("MS_FOOTPRINTS_URL", "").strip()
+_DEFAULT_SLOPE_FACTOR = 1.0   # flat commercial roof ≈ footprint; user-configurable
+_DEFAULT_WASTE_PCT = 10.0     # material waste/overage applied to the area→materials step
+_SQM_TO_SQFT = 10.76391041671
+_M_TO_FT = 3.280839895
+_WGS84_R = 6378137.0          # WGS84 semi-major axis (m), for local tangent-plane projection
 
 # AI model is configurable so a bad/unavailable id never requires a code change.
 # Default is a current, known-good id; a fallback (OPENAI_FALLBACK_MODEL) is used
@@ -269,7 +296,8 @@ def _normalize_db(db) -> bool:
             needs_migration = True
 
     for _key in ("weather_profiles", "templates", "sds", "employees",
-                 "parties", "opportunities", "equipment", "doc_chunks"):
+                 "parties", "opportunities", "equipment", "doc_chunks",
+                 "measurements"):
         if _key not in db:
             db[_key] = {}
             needs_migration = True
@@ -793,6 +821,33 @@ class MaterialOrderRequest(BaseModel):
 class PaymentLinkRequest(BaseModel):
     amount: float                              # dollars (USD)
     description: Optional[str] = None
+
+# P3-14 DIY roof-measurement estimator
+class MeasureOptions(BaseModel):
+    radius_m: Optional[float] = 60.0           # footprint search radius around the point
+    slope_factor: Optional[float] = None       # roof_area = footprint × slope_factor (default 1.0, flat)
+    waste_pct: Optional[float] = None          # material overage applied to area→materials
+    include_solar: Optional[bool] = False      # Fred-gated Google Solar roof-area cross-check
+    include_ai_review: Optional[bool] = False  # run the advisory AI review inline
+
+class MeasureRequest(BaseModel):
+    address: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    job_id: Optional[str] = None               # order-by-address from a job
+    opportunity_id: Optional[str] = None       # …or from a pipeline opportunity
+    options: Optional[MeasureOptions] = None
+
+class SelectCandidateRequest(BaseModel):
+    candidate_id: str
+
+class ManualGeometryRequest(BaseModel):
+    geojson: dict                              # GeoJSON Polygon/MultiPolygon, [lon,lat] rings
+    verification_status: Optional[str] = "user_verified"
+
+class MeasurementToAlphaRequest(BaseModel):
+    job_id: Optional[str] = None               # target job (created if absent + opportunity_id given)
+    opportunity_id: Optional[str] = None
 
 class PermitRequest(BaseModel):
     permit_type: Optional[str] = "roofing"
@@ -1911,12 +1966,14 @@ ROLE: {role_name}. You have financial tools (get_job_financials, company_financi
 
 
 def _create_completion(client, messages: list, tools: Optional[list] = None,
-                       max_completion_tokens: int = 2000):
+                       max_completion_tokens: int = 2000, **extra):
     """Call chat.completions with the configured model, falling back once to a
     known-good model if the primary id is rejected (unknown/unavailable). This
-    keeps the AI from 500-ing on every message just because OPENAI_MODEL is bad."""
+    keeps the AI from 500-ing on every message just because OPENAI_MODEL is bad.
+    Extra kwargs (e.g. response_format) pass straight through to the API."""
     kwargs: Dict[str, Any] = {"messages": messages,
                               "max_completion_tokens": max_completion_tokens}
+    kwargs.update(extra)
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
@@ -4551,6 +4608,715 @@ async def stripe_webhook(request: Request):
                 "source": "stripe", "paid_at": datetime.now().isoformat()}
             save_db(db)
     return {"status": "ok", "event": event.get("type")}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P3-14 — DIY Aerial Building-Footprint & Roof-Area Estimator
+# ───────────────────────────────────────────────────────────────────────────────
+# Geometry holds the tape measure. The pipeline (per the build spec):
+#   address → geocode (Nominatim, keyless) → open building polygons (OSM/Overpass,
+#   keyless) → local equal-area projection → footprint area/perimeter/bbox →
+#   roof-area estimate (footprint × slope) → confidence + warnings → human-
+#   correctable outline → AI used ONLY to verify/flag, never to measure.
+# Paid/keyed sources (Google Solar, Microsoft footprints) are dormant-safe: they
+# degrade to a skipped step + a warning when their env var is unset. Manager+ only.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MEASURE_DISCLAIMER = (
+    "Preliminary remote estimate from open geospatial data. NOT a substitute for "
+    "field verification or final takeoff. Accuracy is affected by imagery/footprint "
+    "recency, roof slope, overhangs, parapets, multiple roof levels, courtyards, "
+    "tree cover, and additions. Verify before ordering materials."
+)
+
+# Source priority scores (build spec — Candidate Confidence Scoring).
+_SOURCE_SCORES = {
+    "manual": 30, "county_gis": 28, "microsoft": 23, "osm": 18,
+    "google_solar": 17, "ai_fallback": 12, "manual_box": 8,
+}
+
+
+def _project_xy(ring, lat0, lon0):
+    """Project a [lon,lat] ring to local tangent-plane meters (equirectangular at
+    the polygon centroid). For building-scale polygons this is sub-0.1% accurate —
+    a defensible 'local equal-area projection' without a heavy geo stack."""
+    coslat = math.cos(math.radians(lat0))
+    return [(math.radians(lon - lon0) * _WGS84_R * coslat,
+             math.radians(lat - lat0) * _WGS84_R) for lon, lat in ring]
+
+
+def _shoelace_area(pts):
+    n = len(pts)
+    s = 0.0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def _ring_perimeter(pts):
+    n = len(pts)
+    p = 0.0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        p += math.hypot(x2 - x1, y2 - y1)
+    return p
+
+
+def _iter_polygons(geom):
+    """Yield each polygon (list of rings; ring = list of [lon,lat]) from a GeoJSON
+    Polygon or MultiPolygon geometry."""
+    t = (geom.get("type") or "").lower()
+    coords = geom.get("coordinates") or []
+    if t == "polygon":
+        yield coords
+    elif t == "multipolygon":
+        for poly in coords:
+            yield poly
+
+
+def _measure_geometry(geom):
+    """Footprint area + perimeter + centroid + bbox from a GeoJSON geometry.
+    Outer rings add area, holes subtract; perimeter counts outer rings only."""
+    polys = list(_iter_polygons(geom))
+    all_pts = [(c[0], c[1]) for poly in polys for ring in poly for c in ring]
+    if not all_pts:
+        raise ValueError("empty geometry")
+    lons = [p[0] for p in all_pts]
+    lats = [p[1] for p in all_pts]
+    lon0, lat0 = sum(lons) / len(lons), sum(lats) / len(lats)
+    minlon, maxlon, minlat, maxlat = min(lons), max(lons), min(lats), max(lats)
+    area_m2 = 0.0
+    perim_m = 0.0
+    for poly in polys:
+        for i, ring in enumerate(poly):
+            xy = _project_xy([(c[0], c[1]) for c in ring], lat0, lon0)
+            a = _shoelace_area(xy)
+            if i == 0:
+                area_m2 += a
+                perim_m += _ring_perimeter(xy)
+            else:
+                area_m2 -= a
+    area_m2 = max(0.0, area_m2)
+    coslat0 = math.cos(math.radians(lat0))
+    width_m = math.radians(maxlon - minlon) * _WGS84_R * coslat0
+    height_m = math.radians(maxlat - minlat) * _WGS84_R
+    return {
+        "areaM2": round(area_m2, 2),
+        "areaSqft": round(area_m2 * _SQM_TO_SQFT, 1),
+        "perimeterM": round(perim_m, 2),
+        "perimeterFt": round(perim_m * _M_TO_FT, 1),
+        "centroid": {"lat": round(lat0, 7), "lon": round(lon0, 7)},
+        "bbox": {"minLat": minlat, "minLon": minlon, "maxLat": maxlat, "maxLon": maxlon},
+        "bbox_dims_ft": {"width": round(width_m * _M_TO_FT, 1),
+                         "length": round(height_m * _M_TO_FT, 1)},
+        "calculationMethod": "local_equal_area_projection",
+    }
+
+
+def _point_in_poly(lon, lat, poly):
+    """Ray-cast point-in-polygon over a GeoJSON polygon (outer ring minus holes)."""
+    def in_ring(ring):
+        inside = False
+        n = len(ring)
+        j = n - 1
+        for i in range(n):
+            xi, yi = ring[i][0], ring[i][1]
+            xj, yj = ring[j][0], ring[j][1]
+            if ((yi > lat) != (yj > lat)) and \
+                    (lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi):
+                inside = not inside
+            j = i
+        return inside
+    if not poly or not in_ring(poly[0]):
+        return False
+    return not any(in_ring(h) for h in poly[1:])
+
+
+def _geom_contains_point(geom, lon, lat):
+    return any(_point_in_poly(lon, lat, poly) for poly in _iter_polygons(geom))
+
+
+def _mk_candidate(idx, source_type, source_name, source_id, geom, tags, source_url=""):
+    return {
+        "candidate_id": f"c{idx}",
+        "source_type": source_type,
+        "source_name": source_name,
+        "source_id": source_id,
+        "source_url": source_url,
+        "tags": tags or {},
+        "geojson": geom,
+        "measurement": _measure_geometry(geom),
+    }
+
+
+def _overpass_buildings(lat, lon, radius_m):
+    """Tier-1 keyless footprint source: OSM building polygons via Overpass."""
+    import requests
+    radius = int(max(10, min(300, radius_m)))
+    q = (f"[out:json][timeout:25];("
+         f'way["building"](around:{radius},{lat},{lon});'
+         f'relation["building"](around:{radius},{lat},{lon});'
+         f");out geom;")
+    data = None
+    last_err = None
+    seen = set()
+    for endpoint in _OVERPASS_MIRRORS:
+        if not endpoint or endpoint in seen:
+            continue
+        seen.add(endpoint)
+        try:
+            r = requests.post(endpoint, data={"data": q},
+                              headers={"User-Agent": "TruAgent/1.0"}, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if data is None:
+        raise RuntimeError(f"all Overpass mirrors failed (last: {last_err})")
+    cands = []
+    for el in data.get("elements", []):
+        etype, eid = el.get("type"), el.get("id")
+        try:
+            if etype == "way" and el.get("geometry"):
+                ring = [[g["lon"], g["lat"]] for g in el["geometry"]]
+                if len(ring) < 4:
+                    continue
+                if ring[0] != ring[-1]:
+                    ring.append(ring[0])
+                geom = {"type": "Polygon", "coordinates": [ring]}
+                cands.append(_mk_candidate(len(cands), "osm", "OpenStreetMap",
+                             f"way/{eid}", geom, el.get("tags"),
+                             f"https://www.openstreetmap.org/way/{eid}"))
+            elif etype == "relation":
+                outers, inners = [], []
+                for m in el.get("members", []):
+                    if not m.get("geometry"):
+                        continue
+                    ring = [[g["lon"], g["lat"]] for g in m["geometry"]]
+                    if len(ring) < 4:
+                        continue
+                    if ring[0] != ring[-1]:
+                        ring.append(ring[0])
+                    (inners if m.get("role") == "inner" else outers).append(ring)
+                if not outers:
+                    continue
+                coords = [[o] + (inners if i == 0 else []) for i, o in enumerate(outers)]
+                geom = {"type": "MultiPolygon", "coordinates": coords}
+                cands.append(_mk_candidate(len(cands), "osm", "OpenStreetMap",
+                             f"relation/{eid}", geom, el.get("tags"),
+                             f"https://www.openstreetmap.org/relation/{eid}"))
+        except Exception:
+            continue
+    return cands
+
+
+def _ms_footprints(lat, lon, radius_m):
+    """Tier-1 Microsoft Open Building Footprints. There is no keyless point-query
+    for the raw MS dataset (it ships as huge regional files needing a preloaded
+    spatial index), so this connector is dormant unless MS_FOOTPRINTS_URL points at
+    a service exposing a point query. Returns [] (degrades gracefully) when unset."""
+    if not MS_FOOTPRINTS_URL:
+        return []
+    import requests
+    try:
+        r = requests.get(MS_FOOTPRINTS_URL,
+                         params={"lat": lat, "lon": lon, "radius_m": int(radius_m)},
+                         timeout=20)
+        r.raise_for_status()
+        feats = (r.json() or {}).get("features", [])
+        out = []
+        for f in feats:
+            geom = f.get("geometry")
+            if geom:
+                out.append(_mk_candidate(len(out), "microsoft",
+                           "Microsoft Building Footprints", f.get("id", ""),
+                           geom, f.get("properties")))
+        return out
+    except Exception:
+        return []
+
+
+def _google_solar_roof_area(lat, lon):
+    """Tier-2 optional roof-area cross-check (Google Solar buildingInsights). Returns
+    {roof_area_m2, roof_area_sqft, source_url} or None. Dormant unless GOOGLE_SOLAR_API_KEY
+    is set. Note: Solar areaMeters2 is tilt-aware roof area, NOT ground footprint."""
+    if not GOOGLE_SOLAR_API_KEY:
+        return None
+    import requests
+    try:
+        r = requests.get(
+            "https://solar.googleapis.com/v1/buildingInsights:findClosest",
+            params={"location.latitude": lat, "location.longitude": lon,
+                    "key": GOOGLE_SOLAR_API_KEY},
+            timeout=20)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        whole = (data.get("solarPotential") or {}).get("wholeRoofStats") or {}
+        area_m2 = whole.get("areaMeters2")
+        if area_m2 is None:
+            segs = (data.get("solarPotential") or {}).get("roofSegmentStats") or []
+            area_m2 = sum((s.get("stats") or {}).get("areaMeters2", 0) for s in segs) or None
+        if not area_m2:
+            return None
+        return {"roof_area_m2": round(area_m2, 2),
+                "roof_area_sqft": round(area_m2 * _SQM_TO_SQFT, 1),
+                "source": "google_solar"}
+    except Exception:
+        return None
+
+
+def _score_candidate(cand, lat, lon):
+    """Confidence score 0–100 (build spec) + the reasons that produced it."""
+    reasons = []
+    score = _SOURCE_SCORES.get(cand["source_type"], 10)
+    reasons.append(f"source:{cand['source_type']} (+{score})")
+    inside = lat is not None and lon is not None and \
+        _geom_contains_point(cand["geojson"], lon, lat)
+    if inside:
+        score += 25
+        reasons.append("geocoded point inside footprint (+25)")
+    else:
+        c = cand["measurement"]["centroid"]
+        if lat is not None and lon is not None:
+            d_m = math.hypot(
+                math.radians(c["lon"] - lon) * _WGS84_R * math.cos(math.radians(lat)),
+                math.radians(c["lat"] - lat) * _WGS84_R)
+            near = max(0, int(15 - d_m / 4))   # closer centroid → up to +15
+            score += near
+            reasons.append(f"point {d_m:.0f} m from footprint centroid (+{near})")
+    sqft = cand["measurement"]["areaSqft"]
+    if 200 <= sqft <= 2_000_000:
+        score += 10
+        reasons.append("footprint size reasonable (+10)")
+    else:
+        reasons.append(f"footprint size unusual ({sqft:.0f} sqft)")
+    if cand.get("tags", {}).get("building") not in (None, "", "yes"):
+        reasons.append(f"OSM building type: {cand['tags']['building']}")
+    cand["confidence_score"] = max(0, min(100, score))
+    cand["confidence_reasons"] = reasons
+    cand["contains_point"] = inside
+    return cand
+
+
+def _confidence_label(score):
+    return "high" if score >= 80 else ("medium" if score >= 55 else "low")
+
+
+def _build_warnings(ranked, selected, lat, lon):
+    w = []
+    if len(ranked) > 1:
+        w.append(f"{len(ranked)} candidate buildings found near the address — confirm the correct one.")
+    if selected and not selected.get("contains_point"):
+        w.append("Geocoded point does not fall inside the selected footprint — likely a parcel-center geocode; verify the building.")
+    if selected and selected["source_type"] == "osm":
+        w.append("Source is OpenStreetMap (community data) — may be outdated or miss recent additions.")
+    if selected and selected["measurement"]["areaSqft"] < 400:
+        w.append("Footprint is very small — may be a shed/garage, not the main building.")
+    return w
+
+
+def _roof_estimate(footprint_sqft, slope_factor, waste_pct):
+    roof = footprint_sqft * slope_factor
+    return {
+        "footprint_sqft": round(footprint_sqft, 1),
+        "slope_factor": slope_factor,
+        "roof_area_sqft": round(roof, 1),
+        "waste_pct": waste_pct,
+        "material_area_sqft": round(roof * (1 + waste_pct / 100.0), 1),
+        "assumptions": [
+            f"Roof area = footprint × slope factor {slope_factor} "
+            f"({'flat/low-slope, roof ≈ footprint' if slope_factor <= 1.0 else 'pitched: roof > footprint'}).",
+            f"Material area adds {waste_pct}% waste/overage on top of roof area.",
+            "Footprint excludes overhangs, parapets, courtyards, and multi-level roofs unless edited.",
+        ],
+    }
+
+
+def _resolve_measure_address(db, req):
+    """Pull an address from a job/opportunity when one isn't supplied directly."""
+    if req.address:
+        return req.address
+    if req.job_id:
+        j = db.get("jobs", {}).get(req.job_id)
+        if j and j.get("address"):
+            return j["address"]
+    if req.opportunity_id:
+        o = db.get("opportunities", {}).get(req.opportunity_id)
+        if o and o.get("address"):
+            return o["address"]
+    return None
+
+
+def _finalize_measurement(rec, selected, ranked, lat, lon, opts):
+    """Apply a chosen candidate to a measurement record (used on create, select, manual)."""
+    slope = opts.get("slope_factor") if opts.get("slope_factor") is not None else _DEFAULT_SLOPE_FACTOR
+    waste = opts.get("waste_pct") if opts.get("waste_pct") is not None else _DEFAULT_WASTE_PCT
+    m = selected["measurement"]
+    score = selected.get("confidence_score", 0)
+    rec.update({
+        "source": {"type": selected["source_type"], "name": selected["source_name"],
+                   "source_id": selected["source_id"], "source_url": selected.get("source_url", ""),
+                   "retrieved_at": datetime.now().isoformat()},
+        "measurement": m,
+        "geometry": {"geojson": selected["geojson"]},
+        "selected_candidate_id": selected["candidate_id"],
+        "confidence": {"score": score, "level": _confidence_label(score),
+                       "reasons": selected.get("confidence_reasons", [])},
+        "roof_estimate": _roof_estimate(m["areaSqft"], slope, waste),
+        "warnings": _build_warnings(ranked, selected, lat, lon),
+    })
+    return rec
+
+
+@app.post("/measurements/estimate")
+async def create_measurement(req: MeasureRequest,
+                             current_user: dict = Depends(get_manager_or_above)):
+    """Order a footprint/roof-area estimate by address (or lat/lon, or from a job/opp).
+    Geometry-first: geocode → open footprints → measure → rank → confidence."""
+    db = load_db()
+    opts = (req.options.dict() if req.options else {})
+    address = _resolve_measure_address(db, req)
+    lat, lon = req.lat, req.lon
+    warnings = []
+    if (lat is None or lon is None):
+        if not address:
+            raise HTTPException(status_code=400,
+                                detail="Provide an address, lat/lon, or a job_id/opportunity_id with an address.")
+        try:
+            lat, lon = _geocode(address)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Geocoding failed: {e}")
+        if lat is None:
+            raise HTTPException(status_code=404, detail="Address could not be geocoded — refine it or pass lat/lon.")
+
+    radius = opts.get("radius_m") or 60.0
+    candidates = []
+    source_errors = []
+    # Source ladder (keyless first). County GIS would slot in ahead of these later.
+    candidates.extend(_ms_footprints(lat, lon, radius))   # dormant unless configured
+    try:
+        candidates.extend(_overpass_buildings(lat, lon, radius))
+    except Exception as e:
+        source_errors.append(f"OSM/Overpass error: {e}")
+    # Reindex candidate ids so they're unique + stable across sources for selection.
+    for i, c in enumerate(candidates):
+        c["candidate_id"] = f"c{i}"
+
+    meas_id = f"meas_{int(datetime.now().timestamp() * 1000)}"
+    rec = {
+        "id": meas_id,
+        "address": address,
+        "coordinates": {"lat": lat, "lon": lon},
+        "options": {"slope_factor": opts.get("slope_factor") if opts.get("slope_factor") is not None else _DEFAULT_SLOPE_FACTOR,
+                    "waste_pct": opts.get("waste_pct") if opts.get("waste_pct") is not None else _DEFAULT_WASTE_PCT,
+                    "radius_m": radius},
+        "verification_status": "unverified",
+        "candidates": candidates,
+        "job_id": req.job_id,
+        "opportunity_id": req.opportunity_id,
+        "created_by": current_user["email"],
+        "created_at": datetime.now().isoformat(),
+        "disclaimer": _MEASURE_DISCLAIMER,
+        "warnings": [],
+        "ai_review": None,
+    }
+
+    if not candidates:
+        rec["status"] = "manual_required"
+        rec["warnings"] = (["No building footprint found near this address from open "
+                            "sources. Draw the outline manually or try a larger radius."]
+                           + source_errors)
+        db.setdefault("measurements", {})[meas_id] = rec
+        save_db(db)
+        return {"status": "manual_required", "measurement": _measurement_summary(rec),
+                "id": meas_id, "warnings": rec["warnings"]}
+
+    ranked = sorted((_score_candidate(c, lat, lon) for c in candidates),
+                    key=lambda c: c["confidence_score"], reverse=True)
+    selected = ranked[0]
+
+    # Optional Google Solar roof-area cross-check (dormant unless keyed).
+    if opts.get("include_solar"):
+        solar = _google_solar_roof_area(lat, lon)
+        if solar:
+            rec["solar_cross_check"] = solar
+            fp = selected["measurement"]["areaSqft"]
+            if fp and abs(solar["roof_area_sqft"] - fp) / fp > 0.30:
+                warnings.append(f"Google Solar roof area ({solar['roof_area_sqft']:.0f} sqft) "
+                                f"differs from footprint by >30% — slope or multi-level roof likely.")
+        else:
+            warnings.append("Google Solar cross-check unavailable (no coverage or GOOGLE_SOLAR_API_KEY unset).")
+
+    _finalize_measurement(rec, selected, ranked, lat, lon, opts)
+    rec["warnings"] = rec["warnings"] + warnings + source_errors
+    rec["verification_status"] = "source_verified"
+    # Selection needed when ambiguous (low confidence or multiple candidates).
+    rec["status"] = ("candidate_selection_recommended"
+                     if (selected["confidence_score"] < 55 or len(ranked) > 1) else "estimated")
+
+    if opts.get("include_ai_review"):
+        rec["ai_review"] = _ai_measurement_review(rec)
+        if rec["ai_review"] and rec["ai_review"].get("verification_status"):
+            rec["verification_status"] = "ai_checked"
+
+    db.setdefault("measurements", {})[meas_id] = rec
+    save_db(db)
+    return {"status": rec["status"], "id": meas_id,
+            "measurement": _measurement_summary(rec),
+            "candidates": [_candidate_summary(c) for c in ranked]}
+
+
+def _candidate_summary(c):
+    return {"candidate_id": c["candidate_id"], "source_type": c["source_type"],
+            "source_name": c["source_name"], "source_url": c.get("source_url", ""),
+            "footprint_sqft": c["measurement"]["areaSqft"],
+            "perimeter_ft": c["measurement"]["perimeterFt"],
+            "dims_ft": c["measurement"]["bbox_dims_ft"],
+            "confidence_score": c.get("confidence_score"),
+            "contains_point": c.get("contains_point"),
+            "centroid": c["measurement"]["centroid"]}
+
+
+def _measurement_summary(rec):
+    """The MVP report shape (build spec) — safe to return to the UI/clients."""
+    return {
+        "id": rec["id"],
+        "address": rec.get("address"),
+        "coordinates": rec.get("coordinates"),
+        "status": rec.get("status"),
+        "measurement": rec.get("measurement"),
+        "roof_estimate": rec.get("roof_estimate"),
+        "source": rec.get("source"),
+        "confidence": rec.get("confidence"),
+        "verification_status": rec.get("verification_status"),
+        "warnings": rec.get("warnings", []),
+        "solar_cross_check": rec.get("solar_cross_check"),
+        "ai_review": rec.get("ai_review"),
+        "geometry": rec.get("geometry"),
+        "job_id": rec.get("job_id"),
+        "opportunity_id": rec.get("opportunity_id"),
+        "candidate_count": len(rec.get("candidates", [])),
+        "disclaimer": rec.get("disclaimer"),
+        "created_at": rec.get("created_at"),
+    }
+
+
+@app.get("/measurements")
+async def list_measurements(current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    out = []
+    for rec in db.get("measurements", {}).values():
+        m = rec.get("measurement") or {}
+        out.append({"id": rec["id"], "address": rec.get("address"),
+                    "status": rec.get("status"),
+                    "footprint_sqft": m.get("areaSqft"),
+                    "roof_area_sqft": (rec.get("roof_estimate") or {}).get("roof_area_sqft"),
+                    "confidence": (rec.get("confidence") or {}).get("level"),
+                    "verification_status": rec.get("verification_status"),
+                    "job_id": rec.get("job_id"),
+                    "created_at": rec.get("created_at")})
+    out.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return {"status": "ok", "measurements": out}
+
+
+@app.get("/measurement/{mid}")
+async def get_measurement(mid: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    rec = db.get("measurements", {}).get(mid)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    summary = _measurement_summary(rec)
+    summary["candidates"] = [_candidate_summary(c) for c in rec.get("candidates", [])]
+    return {"status": "ok", "measurement": summary}
+
+
+@app.post("/measurement/{mid}/select-candidate")
+async def select_candidate(mid: str, req: SelectCandidateRequest,
+                           current_user: dict = Depends(get_manager_or_above)):
+    """Pick a different candidate footprint (multi-building parcels)."""
+    db = load_db()
+    rec = db.get("measurements", {}).get(mid)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    chosen = next((c for c in rec.get("candidates", [])
+                   if c["candidate_id"] == req.candidate_id), None)
+    if not chosen:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    lat = rec["coordinates"]["lat"]
+    lon = rec["coordinates"]["lon"]
+    ranked = sorted((_score_candidate(c, lat, lon) for c in rec["candidates"]),
+                    key=lambda c: c["confidence_score"], reverse=True)
+    _score_candidate(chosen, lat, lon)
+    _finalize_measurement(rec, chosen, ranked, lat, lon, rec.get("options", {}))
+    rec["verification_status"] = "user_adjusted"
+    rec["status"] = "estimated"
+    rec.setdefault("timeline", []).append(
+        {"event": "candidate_selected", "candidate_id": req.candidate_id,
+         "by": current_user["email"], "at": datetime.now().isoformat()})
+    save_db(db)
+    return {"status": "ok", "measurement": _measurement_summary(rec)}
+
+
+@app.post("/measurement/{mid}/manual")
+async def save_manual_geometry(mid: str, req: ManualGeometryRequest,
+                               current_user: dict = Depends(get_manager_or_above)):
+    """Save a human-corrected outline (final reliability layer). Recomputes area
+    from the edited geometry and keeps the source geometry as a separate candidate."""
+    db = load_db()
+    rec = db.get("measurements", {}).get(mid)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    try:
+        manual = _mk_candidate(len(rec.get("candidates", [])), "manual",
+                               "Manual outline", "user-drawn", req.geojson, {})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid geometry: {e}")
+    lat = rec["coordinates"]["lat"]
+    lon = rec["coordinates"]["lon"]
+    _score_candidate(manual, lat, lon)
+    rec.setdefault("candidates", []).append(manual)
+    ranked = [manual] + [c for c in rec["candidates"] if c is not manual]
+    _finalize_measurement(rec, manual, ranked, lat, lon, rec.get("options", {}))
+    rec["verification_status"] = req.verification_status or "user_verified"
+    rec["status"] = "estimated"
+    rec.setdefault("timeline", []).append(
+        {"event": "manual_geometry_saved", "verification_status": rec["verification_status"],
+         "by": current_user["email"], "at": datetime.now().isoformat()})
+    save_db(db)
+    return {"status": "ok", "measurement": _measurement_summary(rec)}
+
+
+def _ai_measurement_review(rec):
+    """AI verify-only layer. Reviews the measurement METADATA (source, area, dims,
+    candidate count, point-relationship) and flags plausibility concerns. It does
+    NOT measure and does NOT process restricted imagery — per the build spec, AI is
+    advisory QC, never the tape measure. Returns None when OpenAI is unconfigured."""
+    client = get_openai_client()
+    if client is None:
+        return None
+    m = rec.get("measurement") or {}
+    src = rec.get("source") or {}
+    payload = {
+        "address": rec.get("address"),
+        "source": src.get("type"),
+        "footprint_sqft": m.get("areaSqft"),
+        "perimeter_ft": m.get("perimeterFt"),
+        "bbox_dims_ft": m.get("bbox_dims_ft"),
+        "confidence": rec.get("confidence"),
+        "candidate_count": len(rec.get("candidates", [])),
+        "point_inside_footprint": next(
+            (c.get("contains_point") for c in rec.get("candidates", [])
+             if c["candidate_id"] == rec.get("selected_candidate_id")), None),
+        "existing_warnings": rec.get("warnings", []),
+        "solar_cross_check": rec.get("solar_cross_check"),
+    }
+    sys = ("You are a quality-control reviewer for a commercial-roof footprint "
+           "estimate. You did NOT see imagery and you must NOT claim to measure "
+           "anything. Given the measurement metadata, judge plausibility for a "
+           "commercial roof, flag likely issues (multi-building parcel, parcel-"
+           "center geocode, shed mistaken for main building, slope/multi-level, "
+           "stale data), and say whether manual verification is recommended. "
+           "Respond ONLY as JSON: {\"outline_alignment\":\"good|questionable|poor|"
+           "not_applicable\",\"concerns\":[],\"recommend_manual_verification\":true|"
+           "false,\"confidence\":\"low|medium|high\",\"notes\":\"\"}.")
+    try:
+        resp = _create_completion(
+            client,
+            [{"role": "system", "content": sys},
+             {"role": "user", "content": json.dumps(payload)}],
+            response_format={"type": "json_object"})
+        content = resp.choices[0].message.content
+        out = json.loads(content)
+        out["verification_status"] = "ai_checked"
+        out["reviewed_at"] = datetime.now().isoformat()
+        out["disclaimer"] = "AI advisory QC only — not a measurement."
+        return out
+    except Exception as e:
+        return {"error": f"AI review failed: {e}", "verification_status": None}
+
+
+@app.post("/measurement/{mid}/ai-review")
+async def run_ai_review(mid: str, current_user: dict = Depends(get_manager_or_above)):
+    db = load_db()
+    rec = db.get("measurements", {}).get(mid)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    if not rec.get("measurement"):
+        raise HTTPException(status_code=400, detail="No measurement to review yet — select a footprint first.")
+    review = _ai_measurement_review(rec)
+    if review is None:
+        return {"status": "not_configured",
+                "message": "AI review needs OPENAI_API_KEY — geometry estimate stands on its own."}
+    rec["ai_review"] = review
+    if review.get("verification_status"):
+        rec["verification_status"] = "ai_checked"
+    save_db(db)
+    return {"status": "ok", "ai_review": review}
+
+
+@app.post("/measurement/{mid}/to-alpha")
+async def measurement_to_alpha(mid: str, req: MeasurementToAlphaRequest,
+                               current_user: dict = Depends(get_manager_or_above)):
+    """Pre-fill an Alpha estimate baseline from this measurement — the same job
+    'budget' shape Alpha sends to /alpha/webhook (so a TruAgent measurement can seed
+    a quote). Writes roof area + dims onto the job's budget and links the measurement."""
+    db = load_db()
+    rec = db.get("measurements", {}).get(mid)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Measurement not found")
+    if not rec.get("roof_estimate"):
+        raise HTTPException(status_code=400, detail="Measurement has no roof estimate yet — select a footprint first.")
+    jobs = db.setdefault("jobs", {})
+    job_id = req.job_id or rec.get("job_id")
+    opp = None
+    if not job_id and (req.opportunity_id or rec.get("opportunity_id")):
+        oid = req.opportunity_id or rec.get("opportunity_id")
+        opp = db.get("opportunities", {}).get(oid)
+        if opp and opp.get("job_id"):
+            job_id = opp["job_id"]
+    created = False
+    if not job_id:
+        # Create a measurement-native job so the baseline has somewhere to live.
+        job_id = f"meas-{mid}"
+        if job_id not in jobs:
+            jobs[job_id] = {"job_id": job_id, "client_name": rec.get("address"),
+                            "address": rec.get("address"), "status": "Pending",
+                            "workflow_stage": "Quote", "images": [], "notes": [],
+                            "created_by": current_user["email"],
+                            "created_at": datetime.now().isoformat()}
+            created = True
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Target job not found")
+    re_ = rec["roof_estimate"]
+    budget = job.setdefault("budget", {})
+    budget["sqft"] = re_["roof_area_sqft"]
+    budget["footprint_sqft"] = re_["footprint_sqft"]
+    budget["perimeter_ft"] = (rec.get("measurement") or {}).get("perimeterFt")
+    budget["measurement_source"] = "truagent_diy_measurement"
+    budget["measurement_id"] = mid
+    budget["measurement_confidence"] = (rec.get("confidence") or {}).get("level")
+    budget["imported_at"] = datetime.now().isoformat()
+    if rec.get("address") and not job.get("address"):
+        job["address"] = rec["address"]
+    rec["job_id"] = job_id
+    rec.setdefault("timeline", []).append(
+        {"event": "prefilled_alpha_baseline", "job_id": job_id,
+         "by": current_user["email"], "at": datetime.now().isoformat()})
+    job.setdefault("notes", []).append(
+        {"note": f"Roof-area baseline {re_['roof_area_sqft']:.0f} sqft pre-filled from "
+                 f"DIY measurement {mid} (confidence {(rec.get('confidence') or {}).get('level')}).",
+         "added_by": current_user["email"], "added_at": datetime.now().isoformat()})
+    save_db(db)
+    return {"status": "ok", "job_id": job_id, "created_job": created,
+            "budget_fields": list(budget.keys()),
+            "roof_area_sqft": re_["roof_area_sqft"]}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

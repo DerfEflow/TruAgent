@@ -95,13 +95,23 @@ Full walkthrough already exists: **`docs/CONNECT_QUICKBOOKS.md`**. In short — 
 
 ---
 
-## 6. 1ESX Measurements  *(Phase 3 — feature not built yet)*
-1. Create an account at **1esx.com** and request **API access**; get your **API key**.
-2. Give Claude the key + their API docs → Claude builds: order-by-address → parse the XML
-   (area, parapet linear feet, penetrations) → pre-fill an Alpha estimate.
-3. **Set on Railway:** `ESX_API_KEY` = your key.
-> Before trusting it for bids: order **one** paid commercial report on a known Truline roof and
-> compare to your own measurement.
+## 6. Roof Measurements — DIY estimator  *(P3-14 — BUILT, works with no setup)*
+The **Measure** tab estimates building footprint + roof area from an address using **free, keyless**
+open data (OpenStreetMap building footprints + Nominatim geocoding). Nothing to turn on — it works
+today. Geometry does the measuring; AI only verifies. **Always field-verify before ordering materials.**
+
+How you use it: open **Measure** → type an address (or a job id) → **Estimate** → confirm the right
+building if several are found → optionally **AI verify** → **Pre-fill Alpha baseline** to push the roof
+area into a job's estimate.
+
+**Optional upgrades (Fred-gated — none are required):**
+- **Google Solar cross-check** — a second roof-area opinion. Create a Google Cloud project, enable the
+  **Solar API**, get a key, **set on Railway:** `GOOGLE_SOLAR_API_KEY`. Then tick "Solar cross-check".
+- **Microsoft footprints** — only if you host a point-query service for the MS dataset; **set on Railway:**
+  `MS_FOOTPRINTS_URL`. (There is no free point API for raw MS data, so this stays off by default.)
+- **Paid 1ESX** — only if you later want survey-grade numbers *alongside* DIY. Create an account at
+  **1esx.com**, request API access, give Claude the key + docs, **set on Railway:** `ESX_API_KEY`.
+> Before trusting any source for bids, compare it to one known Truline roof you've measured yourself.
 
 ---
 

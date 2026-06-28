@@ -138,6 +138,7 @@ function showTab(tabName, btn) {
   if (tabName === 'financials') refreshFinancials();
   if (tabName === 'admin') loadUsers();
   if (tabName === 'pipeline') refreshPipeline();
+  if (tabName === 'measure') refreshMeasurements();
   if (tabName === 'inbox') refreshInbox();
   if (tabName === 'customers') refreshCustomers();
 }
@@ -1567,12 +1568,209 @@ async function refreshCompliance() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MEASURE TAB  (P3-14 DIY roof-area estimator)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _lastMeasurementId = null;
+
+async function runMeasurement() {
+  const address = document.getElementById('meas-address').value.trim();
+  const jobId = document.getElementById('meas-jobid').value.trim();
+  if (!address && !jobId) { alert('Enter an address (or a job id that has one).'); return; }
+  const body = {
+    options: {
+      radius_m: parseFloat(document.getElementById('meas-radius').value) || 60,
+      slope_factor: parseFloat(document.getElementById('meas-slope').value) || 1.0,
+      waste_pct: parseFloat(document.getElementById('meas-waste').value) || 0,
+      include_ai_review: document.getElementById('meas-ai').checked,
+      include_solar: document.getElementById('meas-solar').checked,
+    },
+  };
+  if (address) body.address = address;
+  if (jobId) body.job_id = jobId;
+  const el = document.getElementById('measure-result');
+  el.innerHTML = '<p class="help-text">Geocoding &amp; finding building footprint…</p>';
+  showLoading(true);
+  try {
+    const r = await apiCall('/measurements/estimate', 'POST', body);
+    _lastMeasurementId = r.id;
+    renderMeasurement(r.measurement, r.candidates || []);
+    refreshMeasurements();
+  } catch (e) {
+    el.innerHTML = `<p class="error-message">Measurement failed: ${esc(e.message)}</p>`;
+  } finally { showLoading(false); }
+}
+
+function _confBadge(level) {
+  const col = { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' }[level] || '#6b7280';
+  return `<span style="background:${col};color:#fff;padding:2px 8px;border-radius:999px;font-size:.75rem">${esc(level || 'n/a')}</span>`;
+}
+
+function renderMeasurement(m, candidates) {
+  const el = document.getElementById('measure-result');
+  if (!m) { el.innerHTML = '<p class="error-message">No measurement returned.</p>'; return; }
+  const meas = m.measurement || {};
+  const roof = m.roof_estimate || {};
+  const coords = m.coordinates || {};
+  const src = m.source || {};
+  const conf = m.confidence || {};
+  const dims = meas.bbox_dims_ft || {};
+  const mapsUrl = (coords.lat != null)
+    ? `https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lon}` : '';
+
+  let candHtml = '';
+  if ((candidates || []).length > 1) {
+    candHtml = `<h4 style="margin:1rem 0 .35rem">Candidate buildings (${candidates.length}) — confirm the right one</h4>
+      <div style="max-height:200px;overflow:auto">${candidates.map(c => `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;border-bottom:1px solid var(--border);padding:.3rem 0;font-size:.83rem">
+          <span>${(c.footprint_sqft || 0).toLocaleString()} sqft
+            <span class="help-text">· ${esc(c.source_type)} · conf ${c.confidence_score} ${c.contains_point ? '· ⌖ inside' : ''}</span></span>
+          <button class="btn-secondary" style="font-size:.7rem;padding:1px 6px"
+            onclick="selectMeasCandidate('${c.candidate_id}')">${c.candidate_id === m.selected_candidate_id ? 'Selected' : 'Use this'}</button>
+        </div>`).join('')}</div>`;
+  }
+
+  el.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+        <div>
+          <div class="help-text">${esc(m.address || '')}</div>
+          <div style="font-size:1.6rem;font-weight:700;margin-top:.2rem">${(roof.roof_area_sqft || meas.areaSqft || 0).toLocaleString()} <span style="font-size:.9rem;font-weight:400">sqft est. roof</span></div>
+          <div class="help-text">Footprint ${(meas.areaSqft || 0).toLocaleString()} sqft · w/ ${roof.waste_pct || 0}% waste → ${(roof.material_area_sqft || 0).toLocaleString()} sqft material</div>
+        </div>
+        <div style="text-align:right">${_confBadge(conf.level)}
+          <div class="help-text" style="margin-top:.3rem">${esc(m.verification_status || '')}</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.6rem;margin:.8rem 0">
+        <div><div class="help-text">Perimeter</div><strong>${(meas.perimeterFt || 0).toLocaleString()} ft</strong></div>
+        <div><div class="help-text">Approx dims</div><strong>${dims.width || '?'} × ${dims.length || '?'} ft</strong></div>
+        <div><div class="help-text">Source</div><strong>${esc(src.name || 'n/a')}</strong></div>
+        <div><div class="help-text">Confidence</div><strong>${conf.score != null ? conf.score + '/100' : 'n/a'}</strong></div>
+      </div>
+      ${m.solar_cross_check ? `<div class="help-text">Google Solar roof-area cross-check: ${(m.solar_cross_check.roof_area_sqft||0).toLocaleString()} sqft</div>` : ''}
+      ${(m.warnings || []).length ? `<div class="error-message" style="margin:.5rem 0"><strong>Warnings</strong><ul style="margin:.25rem 0 0 1rem;padding:0">${m.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
+      ${m.ai_review ? `<div style="background:var(--bg);border-radius:6px;padding:.5rem;margin:.5rem 0;font-size:.83rem">
+        <strong>AI verify (advisory):</strong> alignment ${esc(m.ai_review.outline_alignment || '?')}, confidence ${esc(m.ai_review.confidence || '?')}${m.ai_review.recommend_manual_verification ? ' — manual verification recommended' : ''}.
+        ${m.ai_review.notes ? `<div class="help-text">${esc(m.ai_review.notes)}</div>` : ''}</div>` : ''}
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.6rem">
+        ${src.source_url ? `<a class="btn-secondary" href="${esc(src.source_url)}" target="_blank" rel="noopener" style="font-size:.78rem">View footprint (OSM)</a>` : ''}
+        ${mapsUrl ? `<a class="btn-secondary" href="${esc(mapsUrl)}" target="_blank" rel="noopener" style="font-size:.78rem">Aerial (Google Maps)</a>` : ''}
+        <button class="btn-secondary" style="font-size:.78rem" onclick="aiVerifyMeasurement()">AI verify</button>
+        <button class="btn-secondary" style="font-size:.78rem" onclick="showManualEdit()">Manual correct</button>
+        <button class="btn-primary" style="font-size:.78rem" onclick="prefillAlpha()">Pre-fill Alpha baseline</button>
+      </div>
+      <p class="help-text" style="margin:.6rem 0 0;font-style:italic">${esc(m.disclaimer || '')}</p>
+      ${candHtml}
+      <div id="manual-edit-box"></div>
+    </div>`;
+}
+
+async function selectMeasCandidate(cid) {
+  if (!_lastMeasurementId) return;
+  showLoading(true);
+  try {
+    const r = await apiCall(`/measurement/${_lastMeasurementId}/select-candidate`, 'POST', { candidate_id: cid });
+    const full = await apiCall(`/measurement/${_lastMeasurementId}`);
+    renderMeasurement(r.measurement, full.measurement.candidates || []);
+  } catch (e) { alert('Select failed: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+async function aiVerifyMeasurement() {
+  if (!_lastMeasurementId) return;
+  showLoading(true);
+  try {
+    const r = await apiCall(`/measurement/${_lastMeasurementId}/ai-review`, 'POST', {});
+    if (r.status === 'not_configured') { alert(r.message); return; }
+    const full = await apiCall(`/measurement/${_lastMeasurementId}`);
+    renderMeasurement(full.measurement, full.measurement.candidates || []);
+  } catch (e) { alert('AI verify failed: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+async function prefillAlpha() {
+  if (!_lastMeasurementId) return;
+  const jobId = prompt('Pre-fill which job id? Leave blank to create a new measurement-native job:', '');
+  if (jobId === null) return;
+  showLoading(true);
+  try {
+    const body = {};
+    if (jobId.trim()) body.job_id = jobId.trim();
+    const r = await apiCall(`/measurement/${_lastMeasurementId}/to-alpha`, 'POST', body);
+    alert(`Roof-area baseline ${Math.round(r.roof_area_sqft).toLocaleString()} sqft written to job ${r.job_id}` +
+          (r.created_job ? ' (new job created).' : '.') + '\nOpen it in Alpha to finish the quote.');
+  } catch (e) { alert('Pre-fill failed: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+function showManualEdit() {
+  const box = document.getElementById('manual-edit-box');
+  if (!box) return;
+  box.innerHTML = `<div style="margin-top:.6rem;border-top:1px solid var(--border);padding-top:.6rem">
+    <div class="help-text">Paste/edit the corrected outline as GeoJSON geometry ([lon,lat] rings), then save. This becomes the verified geometry.</div>
+    <textarea id="manual-geojson" style="width:100%;height:120px;font-family:monospace;font-size:.75rem;margin-top:.3rem" placeholder='{"type":"Polygon","coordinates":[[[lon,lat],...]]}'></textarea>
+    <button class="btn-primary" style="font-size:.78rem;margin-top:.3rem" onclick="saveManualGeometry()">Save corrected outline</button>
+  </div>`;
+  // Prefill with current geometry for editing.
+  apiCall(`/measurement/${_lastMeasurementId}`).then(full => {
+    const g = (full.measurement.geometry || {}).geojson;
+    if (g) document.getElementById('manual-geojson').value = JSON.stringify(g);
+  }).catch(() => {});
+}
+
+async function saveManualGeometry() {
+  if (!_lastMeasurementId) return;
+  let geojson;
+  try { geojson = JSON.parse(document.getElementById('manual-geojson').value); }
+  catch (e) { alert('Invalid JSON: ' + e.message); return; }
+  showLoading(true);
+  try {
+    const r = await apiCall(`/measurement/${_lastMeasurementId}/manual`, 'POST',
+      { geojson, verification_status: 'user_verified' });
+    const full = await apiCall(`/measurement/${_lastMeasurementId}`);
+    renderMeasurement(r.measurement, full.measurement.candidates || []);
+    alert('Corrected outline saved and verified.');
+  } catch (e) { alert('Save failed: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+async function refreshMeasurements() {
+  const el = document.getElementById('measurements-list');
+  if (!el) return;
+  try {
+    const r = await apiCall('/measurements');
+    const list = r.measurements || [];
+    if (!list.length) { el.innerHTML = '<p class="help-text">No measurements yet.</p>'; return; }
+    el.innerHTML = list.map(m => `
+      <div class="job-card" style="cursor:pointer" onclick="openMeasurement('${m.id}')">
+        <div style="display:flex;justify-content:space-between">
+          <strong>${esc(m.address || m.id)}</strong>
+          <span class="help-text">${m.roof_area_sqft ? Math.round(m.roof_area_sqft).toLocaleString() + ' sqft' : m.status} · ${esc(m.confidence || '')}</span>
+        </div>
+        <div class="help-text">${esc(m.verification_status || '')}${m.job_id ? ' · job ' + esc(m.job_id) : ''}</div>
+      </div>`).join('');
+  } catch (e) { el.innerHTML = `<p class="error-message">Failed to load measurements: ${esc(e.message)}</p>`; }
+}
+
+async function openMeasurement(mid) {
+  showLoading(true);
+  try {
+    _lastMeasurementId = mid;
+    const full = await apiCall(`/measurement/${mid}`);
+    renderMeasurement(full.measurement, full.measurement.candidates || []);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (e) { alert('Failed to open: ' + e.message); }
+  finally { showLoading(false); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tab init hooks — load data when switching to new tabs
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _tabInitializers = {
   production: () => refreshProductionJobs(),
   pipeline: () => refreshPipeline(),
+  measure: () => refreshMeasurements(),
   schedule: () => refreshSchedule(),
   compliance: () => refreshCompliance(),
 };

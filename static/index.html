@@ -44,6 +44,7 @@
       <button class="tab" onclick="showTab('jobs', this)">Jobs</button>
       <button class="tab" onclick="showTab('production', this)">Production</button>
       <button class="tab manager-only hidden" onclick="showTab('pipeline', this)">Pipeline</button>
+      <button class="tab manager-only hidden" onclick="showTab('measure', this)">Measure</button>
       <button class="tab manager-only hidden" onclick="showTab('customers', this)">Customers</button>
       <button class="tab manager-only hidden" onclick="showTab('inbox', this)">Inbox</button>
       <button class="tab manager-only hidden" onclick="showTab('schedule', this)">Schedule</button>
@@ -164,6 +165,36 @@
           <h3>Renewals Due</h3>
         </div>
         <div id="renewals-content"></div>
+      </div>
+
+      <!-- MEASURE TAB (P3-14 DIY roof-area estimator) -->
+      <div id="measure-tab" class="tab-content manager-only">
+        <div class="section-header">
+          <h2>Roof Measure</h2>
+          <button onclick="refreshMeasurements()" class="btn-secondary">Recent</button>
+        </div>
+        <p class="help-text" style="margin:-.25rem 0 .75rem">
+          Preliminary footprint &amp; roof-area estimate from open building data (free).
+          Geometry measures; AI only verifies. Always field-verify before ordering materials.
+        </p>
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.75rem;margin-bottom:1rem">
+          <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+            <input id="meas-address" placeholder="Property address" style="min-width:260px;flex:1">
+            <input id="meas-jobid" placeholder="Link job id (optional)" style="min-width:150px">
+          </div>
+          <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin-top:.5rem">
+            <label class="help-text">Radius m <input id="meas-radius" type="number" value="60" min="15" max="300" style="width:70px"></label>
+            <label class="help-text">Slope factor <input id="meas-slope" type="number" value="1.0" step="0.05" min="1" max="2" style="width:70px"></label>
+            <label class="help-text">Waste % <input id="meas-waste" type="number" value="10" min="0" max="50" style="width:60px"></label>
+            <label class="help-text"><input id="meas-ai" type="checkbox"> AI verify</label>
+            <label class="help-text"><input id="meas-solar" type="checkbox"> Solar cross-check</label>
+            <button class="btn-primary" onclick="runMeasurement()">Estimate</button>
+          </div>
+          <p class="help-text" style="margin:.4rem 0 0">Slope factor: 1.0 flat/low-slope (roof ≈ footprint); raise for pitched roofs.</p>
+        </div>
+        <div id="measure-result"></div>
+        <div class="section-header" style="margin-top:1.5rem"><h3>Recent measurements</h3></div>
+        <div id="measurements-list"></div>
       </div>
 
       <!-- CUSTOMERS TAB (P2-9) -->
