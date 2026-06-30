@@ -78,6 +78,23 @@ QUICKBOOKS_SECRET = _door_secret("QUICKBOOKS_SECRET", "change_this_in_production
 EMAIL_WEBHOOK_URL = os.getenv("EMAIL_WEBHOOK_URL", "")
 SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
 
+# Direct SMTP email backend (preferred over EMAIL_WEBHOOK_URL when configured).
+# Built for Google Workspace: sending FROM a Workspace domain address such as
+# admin@trulineroofing.com is fully deliverable (the domain's own SPF/DKIM/DMARC),
+# unlike a third-party relay spoofing a gmail.com From. Auth uses a Google app
+# password (Workspace account → Security → App passwords). Dormant until SMTP_USER
+# + SMTP_PASSWORD are set; then it powers every outbound email (portal link,
+# cadence, review-asks, inbox replies, material orders) with no Zapier dependency.
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+# Address shown as the sender; defaults to the SMTP login. For Workspace set this to
+# admin@trulineroofing.com (can differ from SMTP_USER if that account is allowed to
+# send-as the address).
+EMAIL_FROM = (os.getenv("EMAIL_FROM", "").strip() or SMTP_USER)
+SMTP_ENABLED = bool(SMTP_USER and SMTP_PASSWORD)
+
 # Inbound webhook secrets for the three sibling-app doors (F1/F2/F3) and the
 # scheduler endpoint (F4). Each is validated server-side on every request.
 ALPHA_SECRET = _door_secret("ALPHA_SECRET", "change_alpha_secret_in_production")
@@ -1060,21 +1077,68 @@ def _queue_email(db: dict, payload: dict, reason: str) -> dict:
     return entry
 
 
+def _smtp_send(payload: dict) -> None:
+    """Send one email via SMTP (e.g. Google Workspace). Raises on failure."""
+    import smtplib
+    import base64
+    from email.message import EmailMessage as _EmailMessage  # local alias: avoid
+    # clobbering the pydantic EmailMessage model defined in this module.
+    msg = _EmailMessage()
+    msg["From"] = EMAIL_FROM
+    msg["To"] = payload.get("to")
+    msg["Subject"] = payload.get("subject", "") or ""
+    msg.set_content(payload.get("body") or "")
+    html = payload.get("html")
+    if html:
+        msg.add_alternative(html, subtype="html")
+    for att in (payload.get("attachments") or []):
+        try:
+            data = base64.b64decode(att["content"])
+            maintype, _, subtype = (att.get("contentType") or "application/octet-stream").partition("/")
+            msg.add_attachment(data, maintype=(maintype or "application"),
+                               subtype=(subtype or "octet-stream"),
+                               filename=att.get("filename", "attachment"))
+        except Exception:
+            pass
+    if SMTP_PORT == 465:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            s.login(SMTP_USER, SMTP_PASSWORD)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASSWORD)
+            s.send_message(msg)
+
+
+def _email_send_now(payload: dict) -> None:
+    """Send an email through the active backend, raising on failure. Prefers direct
+    SMTP (Workspace); falls back to the Zapier EMAIL_WEBHOOK_URL. Raises if neither
+    is configured. Shared by _email_dispatch and the outbox flush so both honor the
+    same backend selection."""
+    if SMTP_ENABLED:
+        _smtp_send(payload)
+        return
+    if EMAIL_WEBHOOK_URL:
+        import requests
+        requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10).raise_for_status()
+        return
+    raise RuntimeError("no email backend configured (set SMTP_USER/SMTP_PASSWORD or EMAIL_WEBHOOK_URL)")
+
+
 def _email_dispatch(db: dict, payload: dict) -> dict:
-    """Single choke point for outbound email. Sends through the Zapier
-    EMAIL_WEBHOOK_URL when configured; otherwise (or on failure) queues the
+    """Single choke point for outbound email. Sends via the active backend (SMTP,
+    else EMAIL_WEBHOOK_URL); on any failure or when nothing is configured, queues the
     email in the outbox instead of dropping it."""
     to = payload.get("to")
-    if not EMAIL_WEBHOOK_URL:
-        entry = _queue_email(db, payload, "email webhook not configured")
+    if not (SMTP_ENABLED or EMAIL_WEBHOOK_URL):
+        entry = _queue_email(db, payload, "no email backend configured")
         return {"status": "queued",
                 "message": (f"Email to {to} saved to the outbox ({entry['id']}). "
-                            "It will send automatically once the email Zap "
-                            "(EMAIL_WEBHOOK_URL) is configured.")}
+                            "It will send automatically once email is configured "
+                            "(SMTP_USER/SMTP_PASSWORD or EMAIL_WEBHOOK_URL).")}
     try:
-        import requests
-        resp = requests.post(EMAIL_WEBHOOK_URL, json=payload, timeout=10)
-        resp.raise_for_status()
+        _email_send_now(payload)
         return {"status": "ok", "message": f"Email sent to {to}"}
     except Exception as e:
         entry = _queue_email(db, payload, f"send failed: {e}")
@@ -2434,16 +2498,15 @@ async def flush_outbox(current_user: dict = Depends(get_manager_or_above)):
 
 
 def _flush_outbox_once() -> str:
-    if not EMAIL_WEBHOOK_URL:
-        return "email webhook not configured — outbox left untouched"
+    if not (SMTP_ENABLED or EMAIL_WEBHOOK_URL):
+        return "no email backend configured — outbox left untouched"
     db = load_db()
     sent = failed = 0
-    import requests
     for entry in db.get("outbox", []):
         if entry.get("status") != "queued":
             continue
         try:
-            requests.post(EMAIL_WEBHOOK_URL, json=entry["payload"], timeout=10).raise_for_status()
+            _email_send_now(entry["payload"])
             entry["status"] = "sent"
             entry["sent_at"] = datetime.now().isoformat()
             sent += 1

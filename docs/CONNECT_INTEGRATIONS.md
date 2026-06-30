@@ -25,8 +25,22 @@ Generate a strong secret when one is needed: `python -c "import secrets; print(s
 
 ---
 
-## 1. Outbound Email  (powers: cadence reminders, review-asks, inbox replies, material orders)
-**Goal:** TruAgent → Zapier → your Gmail/SendGrid sends the email.
+## 1. Outbound Email  (powers: portal link, cadence reminders, review-asks, inbox replies, material orders)
+
+### Option A (recommended) — direct Google Workspace SMTP
+Sends straight from TruAgent through Google, **from `admin@trulineroofing.com`** — fully deliverable
+(your domain's own SPF/DKIM/DMARC), no Zapier.
+1. Sign in to **admin@trulineroofing.com** → **myaccount.google.com → Security**. Turn on
+   **2-Step Verification** (required for app passwords). As Workspace admin, make sure app passwords
+   aren't blocked org-wide (Admin console → Security → less secure/app access).
+2. Still under Security → **App passwords** → create one (name it "TruAgent"). Copy the 16-char code.
+3. **Set on Railway:** `SMTP_USER=admin@trulineroofing.com`, `SMTP_PASSWORD=<the app password>`,
+   `EMAIL_FROM=admin@trulineroofing.com`. (Host/port default to `smtp.gmail.com:587`.)
+4. Done — every outbound email sends from admin@trulineroofing.com. (Or hand Claude the app password
+   and it sets the vars + sends a live test.)
+
+### Option B (fallback) — Zapier Catch Hook
+**Goal:** TruAgent → Zapier → your Gmail/SendGrid sends the email. Used only if SMTP isn't set.
 
 1. In **Zapier**, **Create Zap**.
 2. **Trigger:** *Webhooks by Zapier* → **Catch Hook** → Continue. Zapier shows a **custom webhook URL** — copy it.

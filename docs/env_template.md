@@ -18,7 +18,11 @@ dormant — the app runs and is fully reviewable without any of them.
 | `LEADS_SECRET` | Password the Dominate lead door (`POST /leads/webhook`) must include to create an opportunity | You choose it; paste into the lead-source → TruAgent Zap | Inbound leads webhook uses a default placeholder (insecure — set before connecting) |
 | `CRON_SECRET` | Password the scheduler endpoint (`POST /cron/tick`) must include, sent in the `X-Cron-Secret` request header (never a `?secret=` query param, which would leak into access logs), so only your Railway cron / Zapier Schedule can fire scheduled tasks | You choose it; set it as the `X-Cron-Secret` header in the cron/schedule caller | Door rejects all calls (fail-closed) until set |
 | `ROOFR_WEBHOOK_URL` | Where to push job updates out to Roofr | Zapier "Catch Hook" URL | Sending updates to Roofr returns "not configured" |
-| `EMAIL_WEBHOOK_URL` | Where to send emails (Gmail/SendGrid via Zapier) | Zapier webhook URL | Email feature returns "not configured" |
+| `EMAIL_WEBHOOK_URL` | Fallback email path (Gmail/SendGrid via Zapier) — used only if SMTP isn't set | Zapier webhook URL | Falls back; email queues if neither this nor SMTP is set |
+| `SMTP_USER` | **Preferred email backend.** SMTP login — for Google Workspace, the mailbox the app authenticates as (e.g. `admin@trulineroofing.com`) | Workspace account | Email stays dormant/queues until set (with `SMTP_PASSWORD`) |
+| `SMTP_PASSWORD` | App password for `SMTP_USER` (Google account → Security → App passwords; needs 2-Step Verification on) | Google app password | — |
+| `EMAIL_FROM` | Address shown as the sender | Optional | Defaults to `SMTP_USER` |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP server/port | Optional | Default `smtp.gmail.com` / `587` (STARTTLS; `465` = SSL) |
 | `SMS_WEBHOOK_URL` | Where to send texts (Twilio via Zapier) | Zapier webhook URL | SMS feature returns "not configured" |
 | `ESIGN_WEBHOOK_URL` | Where to route documents for e-signature (DocuSign / a Zapier e-sign step) | Zapier "Catch Hook" or DocuSign Zap URL | E-sign send records the request locally but reports the webhook is "not configured" |
 | `PORT` | Local server port | Optional | Defaults to `5000` |
